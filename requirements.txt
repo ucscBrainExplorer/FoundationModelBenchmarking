@@ -1,0 +1,7 @@
+faiss-cpu
+numpy
+pandas
+scikit-learn
+pronto
+networkx
+boto3
