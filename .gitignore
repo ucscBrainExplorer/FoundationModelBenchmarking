@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (large binary files)
+# Keep unit-tests/mock_data for testing, but ignore actual data
+indices/
+reference_data/
+test_data/
+data/
+
+# Generated outputs
+benchmark_results.csv
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# FAISS indices (except test fixtures)
+*.faiss
+!unit-tests/mock_data/**/*.faiss
+
+# Large data files
+*.npy
+!unit-tests/mock_data/**/*.npy
+*.h5
+*.hdf5
+*.parquet
+
+# AWS credentials (if any)
+.aws/
+credentials
+*.pem
+
+# Documentation PDFs (can be added individually if needed)
+# Keeping the spec PDF out for now - can be added back if team needs it
+*.pdf
