@@ -1,0 +1,42 @@
+format-version: 1.2
+data-version: cl/releases/2024-01-01
+ontology: cl
+
+[Term]
+id: CL:0000000
+name: cell
+
+[Term]
+id: CL:0000001
+name: neuron
+is_a: CL:0000000 ! cell
+
+[Term]
+id: CL:0000002
+name: astrocyte
+is_a: CL:0000000 ! cell
+
+[Term]
+id: CL:0000003
+name: oligodendrocyte
+is_a: CL:0000000 ! cell
+
+[Term]
+id: CL:0000004
+name: microglia
+is_a: CL:0000000 ! cell
+
+[Term]
+id: CL:0000005
+name: endothelial cell
+is_a: CL:0000000 ! cell
+
+[Term]
+id: CL:0000006
+name: GABAergic neuron
+is_a: CL:0000001 ! neuron
+
+[Term]
+id: CL:0000007
+name: glutamatergic neuron
+is_a: CL:0000001 ! neuron

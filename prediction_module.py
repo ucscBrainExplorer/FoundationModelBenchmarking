@@ -32,17 +32,21 @@ def execute_query(index: faiss.Index, query_embeddings: np.ndarray, k: int = 30,
 def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataFrame) -> List[str]:
     """
     Map neighbor indices to cell types and perform majority voting.
-    
+
     Args:
         neighbor_indices (np.ndarray): Indices of neighbors (n_queries, k).
         reference_annotations (pd.DataFrame): DataFrame with 'cell_type_ontology_term_id'.
                                               Assumes index of DataFrame aligns with FAISS index IDs.
-                                              
+
     Returns:
         List[str]: Predicted cell_type_terminology_id for each query.
     """
     predictions = []
-    
+
+    # Handle empty array
+    if neighbor_indices.size == 0:
+        return predictions
+
     # We assume the dataframe index corresponds to the faiss ids (0 to N-1)
     # Check if max index is within bounds
     max_idx = neighbor_indices.max()

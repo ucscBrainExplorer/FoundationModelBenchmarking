@@ -40,69 +40,65 @@ def load_ontology(obo_path: str) -> 'nx.DiGraph':
 def calculate_graph_distance(graph: 'nx.DiGraph', predicted_id: str, truth_id: str) -> int:
     """
     Calculate the distance between predicted node and ground truth node.
-    Distance = shortest path in the undirected version of the graph?
+    Distance = shortest path in the undirected version of the graph.
     The plan says: "via their Lowest Common Ancestor (LCA)."
     Distance = dist(pred, LCA) + dist(truth, LCA).
-    
+
+    For ontology graphs, we use the shortest path in the undirected graph,
+    which represents the semantic distance through the ontology hierarchy.
+
     Args:
         graph (nx.DiGraph): Ontology graph (edges: child -> parent).
         predicted_id (str): Predicted CL ID.
         truth_id (str): Ground truth CL ID.
-        
+
     Returns:
-        int: Distance (number of edges). Returns -1 or large number if not reachable.
+        int: Distance (number of edges). Returns -1 if not reachable.
     """
     if predicted_id == truth_id:
         return 0
-        
+
     if predicted_id not in graph or truth_id not in graph:
-        # If term not found, return a penalty or handle gracefully.
-        # For now, return -1 to indicate error/missing.
+        # If term not found, return -1 to indicate error/missing.
         return -1
-    
-    # Calculate LCA
-    # lowest_common_ancestor requires a DAG.
+
+    # Convert to undirected graph for distance calculation
+    # This allows us to traverse both up and down the hierarchy
+    undirected_graph = graph.to_undirected()
+
     try:
-        # nx.lowest_common_ancestor returns one LCA.
-        # Note: Depending on the graph structure (cycles shouldn't exist in is_a), 
-        # but multiple inheritance exists.
-        lca = nx.lowest_common_ancestor(graph, predicted_id, truth_id)
-    except Exception:
-        # If no common ancestor (disconnected components?), fallback
-        return -1
-        
-    if not lca:
-        return -1
-        
-    # Calculate distance from pred to LCA and truth to LCA
-    try:
-        dist_pred = nx.shortest_path_length(graph, source=predicted_id, target=lca)
-        dist_truth = nx.shortest_path_length(graph, source=truth_id, target=lca)
-        return dist_pred + dist_truth
+        # Calculate shortest path in undirected graph
+        distance = nx.shortest_path_length(undirected_graph, source=predicted_id, target=truth_id)
+        return distance
     except nx.NetworkXNoPath:
+        # If no path exists (disconnected components), return -1
+        return -1
+    except Exception:
+        # Catch any other exceptions
         return -1
 
 def score_batch(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str]) -> Tuple[float, float]:
     """
     Report Mean and Median ontology distance for the dataset.
-    
+
     Args:
         graph (nx.DiGraph): Ontology graph.
         predictions (List[str]): List of predicted IDs.
         ground_truth (List[str]): List of ground truth IDs.
-        
+
     Returns:
         Tuple[float, float]: (Mean Distance, Median Distance)
     """
     distances = []
-    
+
     for p, g in zip(predictions, ground_truth):
         dist = calculate_graph_distance(graph, p, g)
         if dist >= 0:
             distances.append(dist)
         # Else: ignore or penalize? Ignoring for now to avoid skewing with errors.
-        
+
     if not distances:
         return 0.0, 0.0
-        
-    return statistics.mean(distances), statistics.median(distances)
+
+    # Ensure we return floats
+    return float(statistics.mean(distances)), float(statistics.median(distances))

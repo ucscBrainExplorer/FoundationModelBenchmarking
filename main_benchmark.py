@@ -5,10 +5,10 @@ import numpy as np
 from typing import List, Dict
 import time
 
-from .data_loader import load_faiss_index, load_reference_annotations, load_test_batch, download_data_from_s3
-from .prediction_module import execute_query, vote_neighbors
-from .ontology_utils import load_ontology, score_batch
-from .evaluation_metrics import calculate_accuracy
+from data_loader import load_faiss_index, load_reference_annotations, load_test_batch, download_data_from_s3
+from prediction_module import execute_query, vote_neighbors
+from ontology_utils import load_ontology, score_batch
+from evaluation_metrics import calculate_accuracy
 
 # Default Configuration
 DEFAULT_TEST_DIR = "test_data/"
@@ -166,6 +166,7 @@ def run_benchmark(
         # Save to file
         df_results.to_csv("benchmark_results.csv", index=False)
         print("\nResults saved to benchmark_results.csv")
+        # TODO: Add file to s3 - Suhas
     else:
         print("\nNo results generated.")
 
