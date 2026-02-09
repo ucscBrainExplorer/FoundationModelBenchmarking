@@ -126,16 +126,22 @@ class TestVoteNeighbors(unittest.TestCase):
             [5, 6, 7, 8, 9],  # Second query
         ])
 
-        predictions = vote_neighbors(neighbor_indices, self.ref_df)
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
         # Check output
         self.assertIsInstance(predictions, list)
         self.assertEqual(len(predictions), 2)
+        self.assertEqual(len(vote_percentages), 2)
 
         # Each prediction should be a valid cell type ontology term ID
         for pred in predictions:
             self.assertIsInstance(pred, str)
             self.assertTrue(pred.startswith('CL:'))
+        
+        # Vote percentages should be between 0 and 1
+        for pct in vote_percentages:
+            self.assertGreaterEqual(pct, 0.0)
+            self.assertLessEqual(pct, 1.0)
 
     def test_vote_neighbors_unanimous(self):
         """Test voting when all neighbors have the same label."""
@@ -149,10 +155,12 @@ class TestVoteNeighbors(unittest.TestCase):
             # All neighbors have the same label
             neighbor_indices = np.array([same_label_indices[:5]])
 
-            predictions = vote_neighbors(neighbor_indices, self.ref_df)
+            predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
             # Should return the unanimous label
             self.assertEqual(predictions[0], first_label)
+            # Unanimous vote should be 100% (1.0)
+            self.assertEqual(vote_percentages[0], 1.0)
 
     def test_vote_neighbors_tie_breaking(self):
         """Test that tie-breaking works (returns first encountered in Counter)."""
@@ -160,11 +168,14 @@ class TestVoteNeighbors(unittest.TestCase):
         # Counter.most_common returns first encountered in case of tie
         neighbor_indices = np.array([[0, 1, 2, 3, 4]])
 
-        predictions = vote_neighbors(neighbor_indices, self.ref_df)
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
         # Should return some valid prediction (tie-breaking is deterministic)
         self.assertIsInstance(predictions[0], str)
         self.assertTrue(predictions[0].startswith('CL:'))
+        # Vote percentage should be valid
+        self.assertGreater(vote_percentages[0], 0.0)
+        self.assertLessEqual(vote_percentages[0], 1.0)
 
     def test_vote_neighbors_out_of_bounds(self):
         """Test that IndexError is raised for out-of-bounds indices."""
@@ -186,32 +197,92 @@ class TestVoteNeighbors(unittest.TestCase):
         dists, neighbor_indices = execute_query(index, queries, k=10, metric='euclidean')
 
         # Vote on neighbors
-        predictions = vote_neighbors(neighbor_indices, self.ref_df)
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
         # Check predictions
         self.assertEqual(len(predictions), 5)
+        self.assertEqual(len(vote_percentages), 5)
         for pred in predictions:
             self.assertIn(pred, self.ref_df['cell_type_ontology_term_id'].values)
+        for pct in vote_percentages:
+            self.assertGreaterEqual(pct, 0.0)
+            self.assertLessEqual(pct, 1.0)
 
     def test_empty_neighbor_indices(self):
         """Test behavior with empty neighbor indices."""
         neighbor_indices = np.array([]).reshape(0, 0)
 
-        predictions = vote_neighbors(neighbor_indices, self.ref_df)
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
         self.assertEqual(len(predictions), 0)
+        self.assertEqual(len(vote_percentages), 0)
 
     def test_single_neighbor(self):
         """Test voting with k=1 (single neighbor)."""
         neighbor_indices = np.array([[5], [10], [15]])
 
-        predictions = vote_neighbors(neighbor_indices, self.ref_df)
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, self.ref_df)
 
         # Should return the label of each single neighbor
         self.assertEqual(len(predictions), 3)
+        self.assertEqual(len(vote_percentages), 3)
         self.assertEqual(predictions[0], self.ref_df['cell_type_ontology_term_id'].iloc[5])
         self.assertEqual(predictions[1], self.ref_df['cell_type_ontology_term_id'].iloc[10])
         self.assertEqual(predictions[2], self.ref_df['cell_type_ontology_term_id'].iloc[15])
+        # Single neighbor = 100% vote
+        self.assertEqual(vote_percentages[0], 1.0)
+        self.assertEqual(vote_percentages[1], 1.0)
+        self.assertEqual(vote_percentages[2], 1.0)
+    
+    def test_vote_neighbors_filters_missing_labels(self):
+        """Test that missing/empty/NaN labels are filtered out before voting."""
+        import pandas as pd
+        
+        # Create a test DataFrame with some missing labels
+        test_df = pd.DataFrame({
+            'cell_type_ontology_term_id': ['CL:0000001', 'CL:0000002', '', np.nan, 'CL:0000001', 'CL:0000002'],
+            'cell_type': ['type1', 'type2', '', 'missing', 'type1', 'type2']
+        })
+        
+        # Neighbors: [0, 1, 2, 3, 4, 5]
+        # Valid labels: CL:0000001 (indices 0, 4), CL:0000002 (indices 1, 5)
+        # Missing labels: '' (index 2), NaN (index 3)
+        # Should vote among valid labels only
+        neighbor_indices = np.array([[0, 1, 2, 3, 4, 5]])
+        
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, test_df)
+        
+        # Should return a valid label (CL:0000001 or CL:0000002), not empty/NaN
+        self.assertEqual(len(predictions), 1)
+        self.assertEqual(len(vote_percentages), 1)
+        self.assertIn(predictions[0], ['CL:0000001', 'CL:0000002'])
+        self.assertNotEqual(predictions[0], '')
+        self.assertNotEqual(predictions[0], np.nan)
+        # Vote percentage should be valid
+        self.assertGreater(vote_percentages[0], 0.0)
+        self.assertLessEqual(vote_percentages[0], 1.0)
+    
+    def test_vote_neighbors_all_missing_labels(self):
+        """Test that empty string is returned when all neighbors have missing labels."""
+        import pandas as pd
+        
+        # Create a test DataFrame with all missing labels
+        test_df = pd.DataFrame({
+            'cell_type_ontology_term_id': ['', np.nan, '', None],
+            'cell_type': ['', 'missing', '', 'missing']
+        })
+        
+        # All neighbors have missing labels
+        neighbor_indices = np.array([[0, 1, 2, 3]])
+        
+        predictions, vote_percentages = vote_neighbors(neighbor_indices, test_df)
+        
+        # Should return empty string when all labels are missing
+        self.assertEqual(len(predictions), 1)
+        self.assertEqual(len(vote_percentages), 1)
+        self.assertEqual(predictions[0], '')
+        # Vote percentage should be 0.0 when all labels missing
+        self.assertEqual(vote_percentages[0], 0.0)
 
 
 if __name__ == '__main__':

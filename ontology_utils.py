@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Optional, Tuple, List
 import statistics
+import pandas as pd
 
 # Try checking for networkx and pronto, but don't fail at module level 
 # to allow inspection of code even if deps are missing.
@@ -76,6 +77,66 @@ def calculate_graph_distance(graph: 'nx.DiGraph', predicted_id: str, truth_id: s
     except Exception:
         # Catch any other exceptions
         return -1
+
+def calculate_per_cell_distances(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str]) -> List[int]:
+    """
+    Calculate ontology distance for each cell individually.
+
+    Args:
+        graph (nx.DiGraph): Ontology graph.
+        predictions (List[str]): List of predicted IDs.
+        ground_truth (List[str]): List of ground truth IDs.
+
+    Returns:
+        List[int]: List of distances, one per cell. Returns -1 for cells where distance cannot be calculated.
+    """
+    distances = []
+    for p, g in zip(predictions, ground_truth):
+        dist = calculate_graph_distance(graph, p, g)
+        distances.append(dist)
+    return distances
+
+def calculate_avg_neighbor_distances(graph: 'nx.DiGraph', neighbor_labels: List[List[str]], ground_truth: List[str]) -> List[float]:
+    """
+    Calculate average ontology distance across all neighbors for each cell.
+    
+    For each cell, calculates the ontology distance between each neighbor's label
+    and the ground truth, then averages those distances.
+    
+    Args:
+        graph (nx.DiGraph): Ontology graph.
+        neighbor_labels (List[List[str]]): List of lists, where each inner list contains 
+                                          the labels of K neighbors for one cell.
+        ground_truth (List[str]): List of ground truth IDs, one per cell.
+    
+    Returns:
+        List[float]: Average distance across neighbors for each cell. 
+                    Returns np.nan if no valid neighbors found.
+    """
+    import numpy as np
+    
+    avg_distances = []
+    
+    for neighbors, truth in zip(neighbor_labels, ground_truth):
+        neighbor_distances = []
+        
+        # Calculate distance for each neighbor
+        for neighbor_label in neighbors:
+            # Skip invalid labels (empty, NaN, None)
+            if neighbor_label and pd.notna(neighbor_label) and str(neighbor_label).strip() != '':
+                dist = calculate_graph_distance(graph, neighbor_label, truth)
+                if dist >= 0:  # Only count valid distances (not -1)
+                    neighbor_distances.append(dist)
+        
+        # Calculate average if we have valid distances
+        if len(neighbor_distances) > 0:
+            avg_dist = float(np.mean(neighbor_distances))
+            avg_distances.append(avg_dist)
+        else:
+            # No valid neighbors, return NaN
+            avg_distances.append(np.nan)
+    
+    return avg_distances
 
 def score_batch(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str]) -> Tuple[float, float]:
     """

@@ -2,28 +2,49 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: uce-benchmark-job
-  namespace: default
+  namespace: braingeneers
 spec:
   template:
     spec:
       containers:
       - name: benchmark
-        image: uce-benchmark:v1  # Replace with actual image
+        image: suhaso123/uce-benchmark:v1
+        imagePullPolicy: Always
         command: ["python3", "main_benchmark.py"]
-        args: ["--test_dir", "/data/test_data", "--indices_config", "/data/indices/config.txt"]
+        args: [
+          "--test_dir", "/data/test_data",
+          "--ref_annot", "/data/reference_data/prediction_obs.tsv",
+          "--obo", "/data/reference_data/cl.obo",
+          "--generate-plots",
+          "--output-dir", "/data/visualizations"
+        ]
+        resources:
+          requests:
+            memory: "32Gi"
+            cpu: "2"
+          limits:
+            memory: "64Gi"
+            cpu: "4"
         volumeMounts:
         - name: data-volume
           mountPath: /data
-        - name: aws-creds
-          mountPath: /root/.aws
-          readOnly: true
         env:
-        - name: AWS_PROFILE
-          value: "braingeneers"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: latentbrain-aws-creds
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: latentbrain-aws-creds
+              key: AWS_SECRET_ACCESS_KEY
       restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
       volumes:
       - name: data-volume
-        emptyDir: {}  # Use PVC in production
-      - name: aws-creds
-        secret:
-          secretName: aws-credentials # Assumes a secret with credentials file
+        persistentVolumeClaim:
+          claimName: benchmark-data-pvc

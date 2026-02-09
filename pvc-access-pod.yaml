@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-access-pod
+  namespace: braingeneers
+spec:
+  containers:
+  - name: access
+    image: python:3.9-slim
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: data-volume
+      mountPath: /mnt/data
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: benchmark-data-pvc
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  restartPolicy: Never

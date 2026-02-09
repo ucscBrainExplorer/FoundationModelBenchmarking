@@ -1,7 +1,10 @@
-faiss-cpu
-numpy
+faiss-cpu==1.7.4
+numpy<2.0
 pandas
 scikit-learn
 pronto
 networkx
 boto3
+matplotlib
+seaborn
+umap-learn

@@ -153,18 +153,29 @@ def download_data_from_s3(bucket: str, prefix: str, local_dir: str, profile_name
         bucket (str): S3 bucket name.
         prefix (str): Prefix in the bucket (folder path).
         local_dir (str): Local directory to save files.
-        profile_name (str): AWS CLI profile to use.
+        profile_name (str): AWS CLI profile to use (optional, will use env vars if available).
     """
-    try:
-        session = boto3.Session(profile_name=profile_name)
-        s3 = session.client('s3')
-    except Exception as e:
-        print(f"Failed to create boto3 session with profile '{profile_name}': {e}")
-        print("Falling back to default credentials/profile...")
+    # Try environment variables first (for Kubernetes secrets)
+    if os.environ.get('AWS_ACCESS_KEY_ID') and os.environ.get('AWS_SECRET_ACCESS_KEY'):
+        print("Using AWS credentials from environment variables...")
         try:
-            s3 = boto3.client('s3')
-        except Exception as e2:
-            raise RuntimeError(f"Could not connect to S3: {e2}")
+            s3 = boto3.client('s3',
+                            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+                            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'))
+        except Exception as e:
+            raise RuntimeError(f"Could not connect to S3 with environment variables: {e}")
+    else:
+        # Fall back to profile-based authentication
+        try:
+            session = boto3.Session(profile_name=profile_name)
+            s3 = session.client('s3')
+        except Exception as e:
+            print(f"Failed to create boto3 session with profile '{profile_name}': {e}")
+            print("Falling back to default credentials/profile...")
+            try:
+                s3 = boto3.client('s3')
+            except Exception as e2:
+                raise RuntimeError(f"Could not connect to S3: {e2}")
 
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)

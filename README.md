@@ -12,6 +12,98 @@ This project benchmarks cell type prediction accuracy by comparing:
 
 The evaluation uses both standard metrics (accuracy, F1 score) and **biological distance metrics** based on Cell Ontology (CL) graph structures to measure how "close" predictions are to ground truth in the ontology hierarchy.
 
+## Quick Start
+
+### Prerequisites
+
+- **Docker** installed and running
+- **kubectl** configured for your Kubernetes cluster
+- **Access to Kubernetes namespace**: `braingeneers` (or update namespace in YAML files)
+- **Docker Hub account** (for pushing images, or use a different registry)
+
+### Running the Benchmark
+
+1. **Build the Docker image**:
+   ```bash
+   cd FoundationModelBenchmarking
+   docker build --no-cache -t suhaso123/uce-benchmark:v1 .
+   ```
+
+2. **Push to Docker Hub** (or your registry):
+   ```bash
+   docker login
+   docker push suhaso123/uce-benchmark:v1
+   ```
+   
+   **Note**: Update the image name (`suhaso123/uce-benchmark:v1`) in `benchmarking-job.yaml` if using a different registry.
+
+3. **Ensure PVC exists** (for storing results):
+   ```bash
+   kubectl get pvc benchmark-data-pvc -n braingeneers
+   # If missing, create it (see pvc.yaml or create manually)
+   ```
+
+4. **Deploy the benchmark job**:
+   ```bash
+   kubectl delete job uce-benchmark-job -n braingeneers 2>/dev/null  # Delete old job if exists
+   kubectl apply -f benchmarking-job.yaml
+   ```
+
+5. **Monitor the job**:
+   ```bash
+   # Check job status
+   kubectl get job uce-benchmark-job -n braingeneers
+   
+   # Watch logs in real-time
+   kubectl logs -n braingeneers -l job-name=uce-benchmark-job -f
+   ```
+
+6. **Access results** (after job completes):
+   ```bash
+   # Create temporary pod to access PVC
+   kubectl apply -f pvc-access-pod.yaml
+   kubectl wait --for=condition=Ready pod/pvc-access-pod -n braingeneers --timeout=60s
+   
+   # View summary results
+   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results.csv
+   
+   # View detailed analysis
+   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_analysis_report.txt
+   
+   # View per-cell results sample
+   kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/per_cell_results/*_per_cell_results.csv
+   
+   # Clean up access pod when done
+   kubectl delete pod pvc-access-pod -n braingeneers
+   ```
+
+### Expected Runtime
+
+- **Docker Build**: 5-10 minutes (first time), 1-2 minutes (cached)
+- **Docker Push**: 2-5 minutes (depends on network)
+- **Benchmark Execution**: 10-20 minutes (depends on dataset size)
+- **Total**: ~20-35 minutes end-to-end
+
+### Generated Results
+
+After completion, you'll find:
+
+- **`benchmark_results.csv`**: Summary metrics per index/metric combination
+- **`*_per_cell_results.csv`**: Detailed predictions for each cell with:
+  - Cell ID, true label, prediction label
+  - Readable labels (human-readable cell type names)
+  - Vote percentage (how many neighbors voted for the prediction)
+  - Euclidean distances (mean and nearest neighbor)
+  - Ontology distances (prediction vs truth, and average across neighbors)
+- **`ontology_analysis/`**: Comprehensive ontology distance analysis
+- **`visualizations/`**: UMAP plots, confusion matrices, distance distributions
+
+### Detailed Instructions
+
+For complete step-by-step instructions, troubleshooting, and advanced usage, see **[HOW_TO_RUN.md](HOW_TO_RUN.md)**.
+
+---
+
 ## Project Structure
 
 ```
@@ -128,55 +220,67 @@ Results are saved to `benchmark_results.csv` with columns:
 
 ## Installation
 
-### Local Setup
+### Recommended: Kubernetes Deployment (Production)
 
-1. Clone the repository:
+**See [Quick Start](#quick-start) section above for complete instructions.**
+
+The benchmark is designed to run as a Kubernetes job with:
+- Data volume (PVC) mounted at `/data` for persistent storage
+- AWS credentials for S3 access (via Kubernetes secrets or mounted credentials)
+- Automatic data download from S3 if needed
+
+### Local Development Setup
+
+For local development or testing:
+
+1. **Clone the repository**:
+   ```bash
+   git clone <repository-url>
+   cd FoundationModelBenchmarking
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Required packages:
+   - faiss-cpu==1.7.4
+   - numpy<2.0
+   - pandas
+   - scikit-learn
+   - pronto
+   - networkx
+   - boto3
+   - matplotlib
+   - seaborn
+   - umap-learn
+
+3. **Verify installation**:
+   ```bash
+   python3 verify_setup.py
+   ```
+
+4. **Run locally** (requires data files):
+   ```bash
+   python3 -m main_benchmark \
+       --test_dir test_data/ \
+       --ref_annot reference_data/prediction_obs.tsv \
+       --obo reference_data/cl.obo
+   ```
+
+### Docker Setup (Alternative)
+
+Build and run locally with Docker:
 ```bash
-git clone <repository-url>
-cd FoundationModelBenchmarking
-```
-
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-Required packages:
-- faiss-cpu
-- numpy
-- pandas
-- scikit-learn
-- pronto
-- networkx
-- boto3
-
-3. Verify installation:
-```bash
-python3 verify_setup.py
-```
-
-### Docker Setup
-
-Build the container:
-```bash
+# Build
 docker build -t uce-benchmark:v1 .
-```
 
-Run the container:
-```bash
+# Run (mount data directory)
 docker run -v /path/to/data:/data uce-benchmark:v1
 ```
 
-### Kubernetes Deployment
-
-Deploy as a Kubernetes job:
-```bash
-kubectl apply -f benchmarking-job.yaml
-```
-
-The job expects:
-- Data volume mounted at `/data`
-- AWS credentials for S3 access mounted at `/root/.aws`
+**Note**: For production use, we recommend Kubernetes deployment (see Quick Start above).
 
 ## Usage
 
@@ -215,29 +319,55 @@ export AWS_PROFILE=braingeneers
 
 ## Configuration
 
+### Kubernetes Job Configuration
+
+Before deploying, check/update `benchmarking-job.yaml`:
+
+1. **Image name**: Update if using different Docker registry:
+   ```yaml
+   image: suhaso123/uce-benchmark:v1  # Change to your image
+   ```
+
+2. **Namespace**: Default is `braingeneers`, update if needed:
+   ```yaml
+   namespace: braingeneers
+   ```
+
+3. **PVC name**: Ensure PVC exists or update name:
+   ```yaml
+   persistentVolumeClaim:
+     claimName: benchmark-data-pvc  # Must exist in namespace
+   ```
+
+4. **AWS credentials**: Configure via Kubernetes secrets or environment variables:
+   ```yaml
+   env:
+     - name: AWS_ACCESS_KEY_ID
+       valueFrom:
+         secretKeyRef:
+           name: aws-credentials
+           key: access-key-id
+   ```
+
 ### Index Configuration
 
-Edit `main_benchmark.py` to specify index paths:
+The benchmark automatically discovers FAISS indices in `/data/indices/` directory. Expected files:
+- `index_ivfflat.faiss` (or similar naming)
 
-```python
-index_paths = {
-    "ivfFlat": "indices/index_ivfflat.faiss",
-    "ivfPQ": "indices/index_ivfpq.faiss",
-}
-```
-
-Or provide via command-line argument:
+To use different indices, edit `main_benchmark.py` or provide via command-line:
 ```bash
 --indices_config indices/config.txt
 ```
 
-### Default Paths
+### Default Paths (in container)
 
-Configured in `main_benchmark.py`:
-- `DEFAULT_TEST_DIR = "test_data/"`
-- `DEFAULT_INDEX_DIR = "indices/"`
-- `DEFAULT_REF_ANNOTATION = "reference_data/prediction_obs.tsv"`
-- `DEFAULT_OBO_PATH = "reference_data/cl.obo"`
+When running in Kubernetes, data paths are:
+- `/data/indices/` - FAISS index files
+- `/data/reference_data/` - Reference annotations and ontology files
+- `/data/test_data/` - Test datasets (or downloaded from S3)
+- `/data/per_cell_results/` - Per-cell prediction results (output)
+- `/data/visualizations/` - Generated plots (output)
+- `/data/ontology_analysis/` - Ontology analysis reports (output)
 
 ## Expected Input File Formats
 
