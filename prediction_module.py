@@ -7,40 +7,37 @@ from typing import List, Tuple, Union
 def execute_query(index: faiss.Index, query_embeddings: np.ndarray, k: int = 30, metric: str = 'euclidean') -> Tuple[np.ndarray, np.ndarray]:
     """
     Query the FAISS index for the top k nearest neighbors.
-    
+
     Args:
         index (faiss.Index): Loaded FAISS index.
         query_embeddings (np.ndarray): Query vectors (n_queries, dim).
         k (int): Number of neighbors to retrieve.
-        metric (str): Distance metric to use ('euclidean' or 'cosine').
-                      If 'cosine', query vectors will be normalized.
-                      
+        metric (str): Distance metric. Only 'euclidean' is supported for L2-built indices.
+
     Returns:
         dists (np.ndarray): Distances to neighbors.
         indices (np.ndarray): Indices of neighbors.
-    
-    Note:
-        If query embeddings are already normalized (L2 norm = 1.0), then Euclidean
-        and Cosine metrics will produce identical neighbor rankings because:
-        - Euclidean distance on normalized vectors: ||q-v||² = 2(1 - q·v)
-        - Cosine similarity: q·v
-        Since Euclidean = 2(1 - Cosine), the rankings are equivalent.
+
+    Raises:
+        ValueError: If metric='cosine' is used with an L2-built FAISS index.
     """
     # Ensure query_embeddings is float32 as Faiss expects
     queries = query_embeddings.astype(np.float32)
-    
-    # Check if queries are already normalized
-    query_norms = np.linalg.norm(queries, axis=1)
-    are_normalized = np.allclose(query_norms, 1.0, atol=1e-5)
-    
+
     if metric.lower() == 'cosine':
-        # Normalize vectors for cosine similarity (assuming index is compatible or IP)
-        faiss.normalize_L2(queries)
-    elif metric.lower() == 'euclidean' and are_normalized:
-        # Warn that normalized queries will produce same rankings as cosine
-        # This is mathematically correct but may be unexpected
-        pass  # Don't normalize for euclidean, even if queries are normalized
-        
+        # Normalizing only query vectors does NOT produce cosine similarity
+        # when the FAISS index was built with L2 metric. It computes:
+        #   ||q_normalized - v_unnormalized||²
+        # which is neither euclidean nor cosine — it's a meaningless hybrid.
+        # True cosine requires METRIC_INNER_PRODUCT index with all vectors normalized.
+        raise ValueError(
+            "Cosine metric is not supported with an L2-built FAISS index. "
+            "Normalizing only query vectors produces neither cosine similarity "
+            "nor euclidean distance. Use 'euclidean' metric instead. "
+            "If embeddings are already normalized, euclidean and cosine rankings "
+            "are mathematically identical: ||q-v||² = 2(1 - q·v)."
+        )
+
     dists, indices = index.search(queries, k)
     return dists, indices
 
@@ -81,8 +78,15 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
     term_ids = reference_annotations['cell_type_ontology_term_id'].values
     
     for row_indices in neighbor_indices:
-        # Retrieve the terms for the neighbors
-        neighbor_terms = term_ids[row_indices]
+        # Filter out -1 indices (FAISS returns -1 for unfound neighbors)
+        valid_mask = row_indices >= 0
+        valid_indices = row_indices[valid_mask]
+        if len(valid_indices) == 0:
+            predictions.append('')
+            vote_percentages.append(0.0)
+            continue
+        # Retrieve the terms for the valid neighbors
+        neighbor_terms = term_ids[valid_indices]
         
         # Filter out invalid labels (NaN, empty strings, None)
         # Convert to list to handle numpy array indexing properly

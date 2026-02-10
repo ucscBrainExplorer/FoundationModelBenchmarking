@@ -1,13 +1,22 @@
 import os
 import argparse
+import logging
 import pandas as pd
 import numpy as np
 from typing import List, Dict
 import time
 
+# Configure file logging
+logging.basicConfig(
+    filename='benchmark.log',
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 from data_loader import load_faiss_index, load_reference_annotations, load_test_batch, download_data_from_s3
 from prediction_module import execute_query, vote_neighbors
-from ontology_utils import load_ontology, score_batch, calculate_per_cell_distances, calculate_avg_neighbor_distances
+from ontology_utils import load_ontology, precompute_ic, score_batch, calculate_per_cell_distances, calculate_avg_neighbor_distances
 from evaluation_metrics import calculate_accuracy
 try:
     from visualization import generate_visualizations
@@ -29,13 +38,14 @@ def run_benchmark(
     ref_annotation_path: str,
     test_dir: str,
     obo_path: str,
-    metrics: List[str] = ['euclidean', 'cosine'],
+    metrics: List[str] = ['euclidean'],
     k: int = 30,
     download_s3: bool = True,
     s3_bucket: str = "latentbrain",
     s3_prefix: str = "combined_UCE_5neuro/",
     generate_plots: bool = False,
-    output_dir: str = None
+    output_dir: str = None,
+    ontology_method: str = 'ic'
 ):
     """
     Orchestrate the benchmarking process.
@@ -195,7 +205,16 @@ def run_benchmark(
         
         if ontology_graph is None:
             print("Warning: Could not load ontology from any available path. Ontology metrics will be skipped.")
-            
+
+        # Precompute IC values if using IC-based ontology method
+        ic_values = None
+        if ontology_graph is not None and ontology_method == 'ic':
+            print(f"Precomputing Information Content (Zhou k=0.5) for {ontology_graph.number_of_nodes()} terms...")
+            ic_values = precompute_ic(ontology_graph, k=0.5)
+            print(f"  IC precomputation complete.")
+
+        print(f"Ontology scoring method: {ontology_method}")
+
         # Discover Datasets
         datasets = load_test_batch(test_dir)
         if not datasets:
@@ -245,20 +264,6 @@ def run_benchmark(
                     embeddings = np.load(dataset['embedding_path'])
                     metadata_df = pd.read_csv(dataset['metadata_path'], sep='\t')
                     
-                    # Check if embeddings are normalized (will cause identical euclidean/cosine rankings)
-                    query_norms = np.linalg.norm(embeddings, axis=1)
-                    are_normalized = np.allclose(query_norms, 1.0, atol=1e-5)
-                    if are_normalized and len(metrics) > 1:
-                        # Only warn once per dataset
-                        if ds_id not in getattr(run_benchmark, '_warned_datasets', set()):
-                            if not hasattr(run_benchmark, '_warned_datasets'):
-                                run_benchmark._warned_datasets = set()
-                            run_benchmark._warned_datasets.add(ds_id)
-                            print(f"    ⚠️  WARNING: Embeddings are normalized (L2 norm = 1.0)")
-                            print(f"       Euclidean and Cosine metrics will produce IDENTICAL neighbor rankings")
-                            print(f"       because: ||q-v||² = 2(1 - q·v) for normalized vectors")
-                            print(f"       This is mathematically correct but may be unexpected.")
-                    
                     truth_labels = metadata_df['cell_type_ontology_term_id'].tolist()
                     
                     # Execute Prediction
@@ -275,22 +280,55 @@ def run_benchmark(
                     term_ids = ref_df['cell_type_ontology_term_id'].values
                     neighbor_labels = []
                     for row in neighbor_indices:
-                        neighbor_labels.append(term_ids[row].tolist())
+                        valid_row = row[row >= 0]
+                        neighbor_labels.append(term_ids[valid_row].tolist())
                         
+                    # Filter out cells with empty-string predictions before metrics.
+                    # Empty predictions (from cells where all neighbors had invalid labels)
+                    # would create a phantom '' class that drags down macro F1.
+                    valid_mask = [p != '' for p in predictions]
+                    filtered_preds = [p for p, v in zip(predictions, valid_mask) if v]
+                    filtered_truth = [t for t, v in zip(truth_labels, valid_mask) if v]
+                    filtered_neighbors = [n for n, v in zip(neighbor_labels, valid_mask) if v] if neighbor_labels else None
+
+                    if len(filtered_preds) < len(predictions):
+                        n_filtered = len(predictions) - len(filtered_preds)
+                        # Identify which cells had empty predictions for investigation
+                        if 'cell_id' in metadata_df.columns:
+                            empty_cell_ids = [metadata_df['cell_id'].iloc[i] for i, v in enumerate(valid_mask) if not v]
+                        else:
+                            empty_cell_ids = [f"{ds_id}_cell_{i}" for i, v in enumerate(valid_mask) if not v]
+                        logger.warning(
+                            f"{ds_id}/{index_name}/{metric}: {n_filtered} cells had empty predictions "
+                            f"(filtered from metrics). Cell IDs: {empty_cell_ids}"
+                        )
+
                     # Calculate Standard Metrics
-                    metrics_scores = calculate_accuracy(predictions, truth_labels, neighbor_labels)
+                    metrics_scores = calculate_accuracy(filtered_preds, filtered_truth, filtered_neighbors)
                     
                     # Calculate Ontology Metrics
                     per_cell_distances = None
                     avg_neighbor_distances = None
                     if ontology_graph:
-                        mean_dist, median_dist = score_batch(ontology_graph, predictions, truth_labels)
-                        metrics_scores['mean_ontology_dist'] = mean_dist
-                        metrics_scores['median_ontology_dist'] = median_dist
-                        # Calculate per-cell distances for detailed output
-                        per_cell_distances = calculate_per_cell_distances(ontology_graph, predictions, truth_labels)
-                        # Calculate average neighbor distances (average across 30 neighbors for each cell)
-                        avg_neighbor_distances = calculate_avg_neighbor_distances(ontology_graph, neighbor_labels, truth_labels)
+                        mean_score, median_score = score_batch(
+                            ontology_graph, predictions, truth_labels,
+                            method=ontology_method, ic_values=ic_values)
+                        if ontology_method == 'ic':
+                            metrics_scores['mean_ontology_similarity'] = mean_score
+                            metrics_scores['median_ontology_similarity'] = median_score
+                        elif ontology_method == 'shortest_path':
+                            metrics_scores['mean_ontology_dist'] = mean_score
+                            metrics_scores['median_ontology_dist'] = median_score
+                        else:
+                            print(f"    ERROR: Unknown ontology method '{ontology_method}'. Only 'ic' and 'shortest_path' are supported.")
+                        # Calculate per-cell scores for detailed output
+                        per_cell_distances = calculate_per_cell_distances(
+                            ontology_graph, predictions, truth_labels,
+                            method=ontology_method, ic_values=ic_values)
+                        # Calculate average neighbor scores (average across 30 neighbors for each cell)
+                        avg_neighbor_distances = calculate_avg_neighbor_distances(
+                            ontology_graph, neighbor_labels, truth_labels,
+                            method=ontology_method, ic_values=ic_values)
                         # Add aggregate statistic for average neighbor distances
                         valid_avg_neighbor_dists = [d for d in avg_neighbor_distances if pd.notna(d)]
                         if len(valid_avg_neighbor_dists) > 0:
@@ -478,6 +516,9 @@ if __name__ == "__main__":
     parser.add_argument("--s3_prefix", type=str, default="combined_UCE_5neuro/")
     parser.add_argument("--generate-plots", action="store_true", help="Generate UMAP plots and confusion matrices")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for visualization outputs (default: visualizations/)")
+    parser.add_argument("--ontology-method", type=str, default="ic", choices=["ic", "shortest_path"],
+                        help="Ontology scoring method: 'ic' for Lin similarity with Zhou IC (default), "
+                             "'shortest_path' for shortest undirected path distance")
     
     args = parser.parse_args()
     
@@ -497,5 +538,6 @@ if __name__ == "__main__":
         s3_bucket=args.s3_bucket,
         s3_prefix=args.s3_prefix,
         generate_plots=args.generate_plots,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        ontology_method=args.ontology_method
     )
