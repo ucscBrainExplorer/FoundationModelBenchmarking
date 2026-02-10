@@ -160,6 +160,73 @@ distantly related ones score lower, and the ordering is sensible.
 **Use Zhou (k=0.5) IC with Lin similarity** as the ontology-based semantic similarity
 metric in the benchmarking framework.
 
+## Correlation Between IC Similarity and Shortest-Path Distance
+
+To understand how the two ontology scoring methods relate, we computed both metrics for
+2,000 random CL term pairs (1,788 valid — both methods returned a result) and measured
+correlation.
+
+### Summary
+
+| Metric | Value |
+|--------|-------|
+| Pearson r | **-0.34** |
+| Spearman r (rank) | **-0.47** |
+
+The two methods are only **moderately anti-correlated**. They agree on the broad ranking
+of term pairs (nearby pairs score similarly under both) but disagree on roughly half the
+fine-grained ordering.
+
+### Mean IC Similarity at Each Shortest-Path Distance
+
+    distance  mean_sim  median_sim  std     n
+    =========================================
+         1     0.7372       —        —       1
+         2     0.5966    0.6405    0.1922   15
+         3     0.5329    0.5992    0.2204   44
+         4     0.3349    0.2591    0.2252  112
+         5     0.2843    0.2105    0.1912  201
+         6     0.2593    0.1986    0.1627  281
+         7     0.2259    0.1857    0.1284  322
+         8     0.2257    0.1824    0.1120  309
+         9     0.2171    0.1766    0.1116  194
+        10     0.2075    0.1760    0.0806  126
+        11     0.1832    0.1703    0.0656   75
+        12     0.1802    0.1704    0.0645   54
+        13     0.1763    0.1649    0.0588   33
+        14     0.1622    0.1612    0.0038   10
+        15     0.1615    0.1611    0.0041    9
+        16     0.1597       —        —       1
+        17     0.1554       —        —       1
+
+### Interpretation
+
+1. **High variance at mid-range distances.** At distance=4, the IC similarity standard
+   deviation is 0.23 on a mean of 0.33. Two term pairs that are 4 hops apart can have
+   vastly different semantic similarity — some 4-hop paths cross meaningful biological
+   boundaries while others stay within a single branch.
+
+2. **Diminishing sensitivity at longer distances.** Shortest-path distances 7 through 12
+   all produce roughly similar IC similarity values (~0.18–0.23). The path method keeps
+   counting hops, but IC correctly saturates — terms that far apart are all "distant"
+   regardless of a few extra edges.
+
+3. **IC captures edge weight implicitly.** A hop near the leaves (between specific cell
+   subtypes like Purkinje cell → GABAergic neuron) carries more semantic weight than a
+   hop near the root (between broad categories like cell → native cell). Shortest-path
+   treats all edges as equally meaningful.
+
+These results confirm that IC similarity and shortest-path distance capture partially
+overlapping but distinct information about ontological relatedness. The IC method is
+recommended as the default because it better reflects biological intuition, is
+well-defined on DAGs with multiple inheritance, and avoids the ambiguities of
+undirected path shortcutting.
+
+### Reproducibility
+
+Analysis was run on the full Cell Ontology (3,434 CL terms), sampling 2,000 random pairs
+with seed=42. Zhou k=0.5 IC with Lin similarity vs. shortest undirected path distance.
+
 ## References
 
 - Lin, D. (1998). An Information-Theoretic Definition of Similarity. In *Proceedings of

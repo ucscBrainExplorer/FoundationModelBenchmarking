@@ -7,10 +7,10 @@ A modular Python framework for benchmarking K-Nearest Neighbors (KNN) model accu
 This project benchmarks cell type prediction accuracy by comparing:
 - **Foundation models**: UCE, SCimilarity, etc.
 - **FAISS index types**: IVF Flat, IVF PQ
-- **Distance metrics**: Euclidean, Cosine
+- **Distance metrics**: Euclidean
 - **Test datasets**: Organoids, post-mortem adult brain, etc.
 
-The evaluation uses both standard metrics (accuracy, F1 score) and **biological distance metrics** based on Cell Ontology (CL) graph structures to measure how "close" predictions are to ground truth in the ontology hierarchy.
+The evaluation uses both standard metrics (accuracy, F1 score) and **ontology-aware metrics** based on Cell Ontology (CL) graph structures to measure how semantically "close" predictions are to ground truth in the biological hierarchy.
 
 ## Quick Start
 
@@ -63,16 +63,17 @@ The evaluation uses both standard metrics (accuracy, F1 score) and **biological 
    # Create temporary pod to access PVC
    kubectl apply -f pvc-access-pod.yaml
    kubectl wait --for=condition=Ready pod/pvc-access-pod -n braingeneers --timeout=60s
-   
-   # View summary results
-   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results.csv
-   
-   # View detailed analysis
-   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_analysis_report.txt
-   
-   # View per-cell results sample
-   kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/per_cell_results/*_per_cell_results.csv
-   
+
+   # List available runs
+   kubectl exec -n braingeneers pvc-access-pod -- ls /mnt/data/benchmark_results/
+
+   # View a run's summary (replace {timestamp} with actual value)
+   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/benchmark_results.csv
+
+   # Or download from S3 (results are uploaded automatically)
+   aws s3 ls s3://latentbrain/combined_UCE_5neuro/benchmark_results/
+   aws s3 cp --recursive s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/ ./results/
+
    # Clean up access pod when done
    kubectl delete pod pvc-access-pod -n braingeneers
    ```
@@ -86,17 +87,51 @@ The evaluation uses both standard metrics (accuracy, F1 score) and **biological 
 
 ### Generated Results
 
-After completion, you'll find:
+Each run creates a timestamped directory so previous results are never overwritten.
+The same structure is used locally and on S3.
 
-- **`benchmark_results.csv`**: Summary metrics per index/metric combination
-- **`*_per_cell_results.csv`**: Detailed predictions for each cell with:
-  - Cell ID, true label, prediction label
-  - Readable labels (human-readable cell type names)
-  - Vote percentage (how many neighbors voted for the prediction)
-  - Euclidean distances (mean and nearest neighbor)
-  - Ontology distances (prediction vs truth, and average across neighbors)
-- **`ontology_analysis/`**: Comprehensive ontology distance analysis
-- **`visualizations/`**: UMAP plots, confusion matrices, distance distributions
+**Local (cluster at `/data`, or `.` for local development):**
+```
+{DATA_ROOT}/benchmark_results/{timestamp}/
+├── benchmark_results.csv              Summary metrics per index/metric/dataset
+├── benchmark.log                      Run log (warnings, filtered cells, timing)
+├── per_cell_results/
+│   └── {dataset}_{index}_{metric}_per_cell_results.csv
+├── ontology_analysis/
+│   └── ontology_analysis_report.txt
+└── visualizations/                    (if --generate-plots)
+```
+
+**S3 (uploaded automatically unless `--no-upload` or `--no-s3`):**
+```
+s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/
+├── benchmark_results.csv
+├── benchmark.log
+├── per_cell_results/
+│   └── {dataset}_{index}_{metric}_per_cell_results.csv
+├── ontology_analysis/
+│   └── ontology_analysis_report.txt
+└── visualizations/
+```
+
+**Per-cell results CSV columns:**
+- Cell ID, true label, prediction label (both ontology ID and readable name)
+- Vote percentage (how many neighbors voted for the prediction)
+- Euclidean distances (mean and nearest neighbor)
+- Ontology score (prediction vs truth, and average across neighbors)
+
+**Retrieving results from the cluster:**
+```bash
+# List available runs
+kubectl exec -n braingeneers pvc-access-pod -- ls /mnt/data/benchmark_results/
+
+# View a specific run's summary
+kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/benchmark_results.csv
+
+# Or download from S3
+aws s3 ls s3://latentbrain/combined_UCE_5neuro/benchmark_results/
+aws s3 cp --recursive s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/ ./results/
+```
 
 ### Detailed Instructions
 
@@ -129,7 +164,7 @@ FoundationModelBenchmarking/
 |--------|---------------------|------------------|
 | `data_loader.py` | IO operations for FAISS indices, TSV annotations, and NumPy embeddings. Handles S3 data downloads. | faiss, numpy, pandas, boto3, os |
 | `prediction_module.py` | KNN search execution with metric switching (Euclidean/Cosine). Implements majority voting for cell type prediction. | numpy, collections, faiss |
-| `ontology_utils.py` | OBO file parsing, DAG construction, and graph distance calculations using Lowest Common Ancestor (LCA). | pronto, networkx |
+| `ontology_utils.py` | OBO file parsing, DAG construction, IC-based Lin similarity (default) and shortest-path distance. | pronto, networkx |
 | `evaluation_metrics.py` | Statistical calculations: Accuracy, F1 (Macro & Weighted), Top-k Accuracy | sklearn.metrics |
 | `main_benchmark.py` | Orchestrates benchmarking loops across Index Type × Metric × Dataset permutations | All of the above |
 
@@ -162,9 +197,7 @@ s3://latentbrain/combined_UCE_5neuro/
 execute_query(index, query_embeddings, k=30, metric='euclidean')
 ```
 - Queries FAISS index for top k nearest neighbors
-- Supports metric switching:
-  - `'euclidean'`: L2 distance
-  - `'cosine'`: Cosine similarity (vectors are normalized)
+- Uses Euclidean (L2) distance
 
 #### Majority Voting
 ```python
@@ -182,22 +215,35 @@ vote_neighbors(neighbor_indices, reference_annotations)
 - **F1 Score**: Macro and weighted averages across cell types
 
 #### Ontology-Aware Metrics
-Uses Cell Ontology (CL) graph structure to calculate biological distance:
 
-```python
-calculate_graph_distance(graph, predicted_id, truth_id)
-```
+Two methods are available, selectable via `--ontology-method`:
 
-**Distance Calculation**:
-1. Find Lowest Common Ancestor (LCA) of predicted and truth nodes
-2. Calculate: `distance = path_length(predicted → LCA) + path_length(truth → LCA)`
-3. Returns edge count (0 = exact match, higher = more distant)
+**Method 1: IC-based Lin Similarity (default, `--ontology-method ic`)**
 
-**Batch Scoring**:
-- Mean ontology distance
-- Median ontology distance
+Uses Information Content (IC) to measure semantic similarity between predicted and ground truth cell types.
 
-This accounts for cases where predictions are "close" in the ontology hierarchy even if not exact matches.
+| Score | Meaning |
+|-------|---------|
+| **1.0** | Identical terms (perfect prediction) |
+| **> 0.8** | Closely related (e.g., neuron subtypes) |
+| **0.4 – 0.7** | Moderately related (e.g., neuron vs. astrocyte) |
+| **~0.0** | Unrelated (e.g., near the ontology root) |
+
+**Higher similarity = better prediction.** A prediction of "Purkinje neuron" when the truth is "cerebellar granule cell" will score higher than a prediction of "erythrocyte", reflecting the biological relatedness of the cell types.
+
+IC values are precomputed using the Zhou (2008) weighted intrinsic IC formula, which blends descendant count with structural depth. Similarity between two terms is computed using Lin (1998): `Sim(A,B) = 2 * IC(MICA) / (IC(A) + IC(B))`, where MICA is the Most Informative Common Ancestor.
+
+Result columns: `mean_ontology_similarity`, `median_ontology_similarity`
+
+**Method 2: Shortest-Path Distance (`--ontology-method shortest_path`)**
+
+Computes the shortest undirected path between two terms in the ontology graph.
+
+**Lower distance = better prediction.** A distance of 0 means an exact match; larger values mean the terms are farther apart in the hierarchy.
+
+Note: on DAGs with multiple inheritance (the Cell Ontology has 33.5% multi-parent terms), shortest undirected path can shortcut across separate branches, potentially underestimating true semantic distance. The IC method is recommended for this reason.
+
+Result columns: `mean_ontology_dist`, `median_ontology_dist`
 
 ### 4. Benchmarking Orchestration
 
@@ -205,10 +251,10 @@ The `run_benchmark()` function orchestrates nested loops:
 
 ```python
 for index_type in ['ivfFlat', 'ivfPQ']:
-    for metric in ['euclidean', 'cosine']:
+    for metric in ['euclidean']:
         for dataset in test_datasets:
             # Execute query
-            # Calculate metrics
+            # Calculate metrics (standard + ontology)
             # Record results
 ```
 
@@ -304,6 +350,16 @@ python3 -m main_benchmark \
     --s3_prefix combined_UCE_5neuro/
 ```
 
+### Choose Ontology Scoring Method
+
+```bash
+# IC-based Lin similarity (default, recommended)
+python3 -m main_benchmark --ontology-method ic
+
+# Shortest-path distance (original method)
+python3 -m main_benchmark --ontology-method shortest_path
+```
+
 ### Skip S3 Download
 
 ```bash
@@ -361,13 +417,12 @@ To use different indices, edit `main_benchmark.py` or provide via command-line:
 
 ### Default Paths (in container)
 
-When running in Kubernetes, data paths are:
+When running in Kubernetes, input data paths are:
 - `/data/indices/` - FAISS index files
 - `/data/reference_data/` - Reference annotations and ontology files
 - `/data/test_data/` - Test datasets (or downloaded from S3)
-- `/data/per_cell_results/` - Per-cell prediction results (output)
-- `/data/visualizations/` - Generated plots (output)
-- `/data/ontology_analysis/` - Ontology analysis reports (output)
+
+Output is written to `/data/benchmark_results/{timestamp}/` (see [Generated Results](#generated-results)).
 
 ## Expected Input File Formats
 
@@ -412,8 +467,10 @@ When running in Kubernetes, data paths are:
 | f1_macro | Macro-averaged F1 score |
 | f1_weighted | Weighted F1 score |
 | top_k_accuracy | Proportion where truth in top-k neighbors |
-| mean_ontology_dist | Mean graph distance in CL ontology |
-| median_ontology_dist | Median graph distance in CL ontology |
+| mean_ontology_similarity | Mean Lin similarity (0-1, **higher = more similar**). Present when `--ontology-method ic` (default). |
+| median_ontology_similarity | Median Lin similarity. |
+| mean_ontology_dist | Mean shortest-path distance (**lower = more similar**). Present when `--ontology-method shortest_path`. |
+| median_ontology_dist | Median shortest-path distance. |
 | Avg_Query_Time_ms | Average query time per cell (milliseconds) |
 
 ## Implementation Status
@@ -619,3 +676,5 @@ For questions or issues, please open an issue on GitHub or contact [contact info
 - [Cell Ontology](http://obofoundry.org/ontology/cl.html)
 - [Universal Cell Embeddings](https://www.biorxiv.org/content/10.1101/2023.11.28.568918v1)
 - [CELLxGENE](https://cellxgene.cziscience.com/)
+- Lin, D. (1998). An Information-Theoretic Definition of Similarity. In *Proceedings of the 15th International Conference on Machine Learning (ICML 1998)*, Vol. 98, pp. 296-304.
+- Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content for Semantic Similarity in WordNet. In *2008 Second International Conference on Future Generation Communication and Networking Symposia*, Hainan, China, pp. 85-89. doi: 10.1109/FGCNS.2008.16.

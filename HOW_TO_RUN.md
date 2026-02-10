@@ -13,7 +13,7 @@
 
 ### 1.1 Navigate to Project Directory
 ```bash
-cd /Users/Suhas/FoundationModelBenchmarking
+cd FoundationModelBenchmarking
 ```
 
 ### 1.2 Build Docker Image (with --no-cache to include latest code)
@@ -21,7 +21,7 @@ cd /Users/Suhas/FoundationModelBenchmarking
 docker build --no-cache -t suhaso123/uce-benchmark:v1 .
 ```
 
-**Expected Output**: 
+**Expected Output**:
 ```
 [+] Building ... FINISHED
  => naming to docker.io/suhaso123/uce-benchmark:v1
@@ -49,8 +49,6 @@ docker push suhaso123/uce-benchmark:v1
 ```
 The push refers to repository [docker.io/suhaso123/uce-benchmark]
 ...
-5feb82d2dbfd: Pushed
-...
 v1: digest: sha256:... size: ...
 ```
 
@@ -67,21 +65,6 @@ kubectl get pvc benchmark-data-pvc -n braingeneers
 If the PVC doesn't exist, create it:
 ```bash
 kubectl apply -f pvc.yaml
-```
-
-**Note**: You may need to create `pvc.yaml` if it doesn't exist. Basic format:
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: benchmark-data-pvc
-  namespace: braingeneers
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
 ```
 
 ---
@@ -151,9 +134,12 @@ kubectl logs -n braingeneers -l job-name=uce-benchmark-job -f
 **What to Look For**:
 - `Loading FAISS index...` - Index loading
 - `Processing Index: ivfFlat` - Processing started
-- `✓ Saved per-cell results...` - Results being saved
-- `Results saved to /data/benchmark_results.csv` - Summary complete
+- `Precomputing Information Content...` - IC precomputation (once per run)
+- `Saved per-cell results...` - Results being saved
+- `Results saved to /data/benchmark_results/{timestamp}/benchmark_results.csv` - Summary complete
 - `Ontology analysis complete` - Full pipeline complete
+- `Uploading results to s3://...` - S3 upload in progress
+- `files uploaded to s3://...` - S3 upload complete
 
 **To exit logs**: Press `Ctrl+C`
 
@@ -161,11 +147,6 @@ kubectl logs -n braingeneers -l job-name=uce-benchmark-job -f
 ```bash
 kubectl describe pod -n braingeneers -l job-name=uce-benchmark-job
 ```
-
-**Look for**:
-- Events section (shows what's happening)
-- Status conditions
-- Resource usage
 
 ---
 
@@ -191,183 +172,169 @@ kubectl get pods -n braingeneers -l job-name=uce-benchmark-job
 
 ---
 
-## Step 8: Access Results via Temporary Pod
+## Step 8: Access Results
 
-### 8.1 Create Access Pod
+Results are available in three ways: S3 (easiest), PVC access pod, or kubectl cp.
+
+### Option A: Download from S3 (Recommended)
+
+Results are uploaded to S3 automatically after each run.
+
 ```bash
+# List available runs
+aws s3 ls s3://latentbrain/combined_UCE_5neuro/benchmark_results/
+
+# Download a specific run's results
+aws s3 cp --recursive s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/ ./results/
+
+# View summary
+cat ./results/benchmark_results.csv
+```
+
+### Option B: Access via PVC Pod
+
+```bash
+# Create access pod
 kubectl apply -f pvc-access-pod.yaml
-```
-
-### 8.2 Wait for Pod to be Ready
-```bash
 kubectl wait --for=condition=Ready pod/pvc-access-pod -n braingeneers --timeout=60s
+
+# List available runs
+kubectl exec -n braingeneers pvc-access-pod -- ls /mnt/data/benchmark_results/
+
+# View a run's summary (replace {timestamp} with actual value, e.g. 20260210_143022)
+kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/benchmark_results.csv
+
+# View ontology analysis
+kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/ontology_analysis/ontology_analysis_report.txt
+
+# View per-cell results sample
+kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/benchmark_results/{timestamp}/per_cell_results/*_per_cell_results.csv
+
+# View the run log (warnings, filtered cells, timing)
+kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/benchmark.log
+
+# List all files in a run
+kubectl exec -n braingeneers pvc-access-pod -- find /mnt/data/benchmark_results/{timestamp} -type f | sort
 ```
 
-**If it times out**, check pod status:
-```bash
-kubectl get pod pvc-access-pod -n braingeneers
-kubectl describe pod pvc-access-pod -n braingeneers
-```
+### Option C: Copy Results Locally via kubectl
 
-**Common Issues**:
-- Pod stuck in `Pending`: Check node selector matches available nodes
-- PVC not found: Create PVC (Step 3.2)
-
----
-
-## Step 9: View Results
-
-### 9.1 View Summary Results (Benchmark Metrics)
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results.csv
-```
-
-**Expected Output**:
-```
-Index,Metric,Dataset,Avg_Query_Time_ms,accuracy,f1_macro,f1_weighted,top_k_accuracy,mean_ontology_dist,median_ontology_dist
-ivfFlat,euclidean,e4ddac12-f48f-4455-8e8d-c2a48a683437,0.32,0.8942,0.1499,0.9125,0.9129,0.0998,0.0
-ivfFlat,cosine,e4ddac12-f48f-4455-8e8d-c2a48a683437,0.31,0.8942,0.1499,0.9125,0.9129,0.0998,0.0
-```
-
-### 9.2 View Ontology Analysis Report
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_analysis_report.txt
-```
-
-**Shows**:
-- Overall statistics
-- Distance distribution
-- Relationship to accuracy metrics
-- Correlation analysis
-
-### 9.3 List All Generated Files
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- find /mnt/data -type f | sort
-```
-
-**Expected Files**:
-- `/mnt/data/benchmark_results.csv` - Summary metrics
-- `/mnt/data/per_cell_results/*_per_cell_results.csv` - Per-cell predictions
-- `/mnt/data/ontology_analysis/ontology_analysis_report.txt` - Detailed analysis
-- `/mnt/data/ontology_analysis/ontology_distance_accuracy_relationship.csv` - Distance-accuracy correlation
-- `/mnt/data/visualizations/*.png` - UMAP plots, confusion matrix
-- `/mnt/data/visualizations/summary_table.csv` - Summary table
-
-### 9.4 View Sample Per-Cell Results
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/per_cell_results/e4ddac12-f48f-4455-8e8d-c2a48a683437_ivfFlat_euclidean_per_cell_results.csv
-```
-
-**Shows**: First 50 rows with cell_id, true_label, prediction_label, ontology_distance
-
-### 9.5 View Distance-Accuracy Relationship
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_distance_accuracy_relationship.csv
-```
-
-**Shows**: How accuracy varies by ontology distance
-
----
-
-## Step 10: Run Detailed Analysis Script (Optional)
-
-### 10.1 Install Required Packages in Pod
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- pip install pandas numpy
-```
-
-### 10.2 Copy Analysis Script to Pod
-```bash
-kubectl cp analyze_per_cell_results.py braingeneers/pvc-access-pod:/tmp/analyze_per_cell_results.py
-```
-
-### 10.3 Run Analysis Script
-```bash
-kubectl exec -n braingeneers pvc-access-pod -- python3 /tmp/analyze_per_cell_results.py --results-dir /mnt/data/per_cell_results --benchmark-results /mnt/data/benchmark_results.csv --max-rows 200
-```
-
-**Output Includes**:
-- Per-cell results table
-- Ontology tree distance statistics
-- Relationship between tree distance and metrics
-- Distance distribution analysis
-
----
-
-## Step 11: Download Results Locally (Optional)
-
-### 11.1 Create Local Directory
 ```bash
 mkdir -p local_results
-```
 
-### 11.2 Copy Results Files
-```bash
-# Copy benchmark results
-kubectl cp braingeneers/pvc-access-pod:/mnt/data/benchmark_results.csv ./local_results/benchmark_results.csv
-
-# Copy per-cell results (one file at a time)
-kubectl cp braingeneers/pvc-access-pod:/mnt/data/per_cell_results/e4ddac12-f48f-4455-8e8d-c2a48a683437_ivfFlat_euclidean_per_cell_results.csv ./local_results/euclidean_per_cell_results.csv
-
-kubectl cp braingeneers/pvc-access-pod:/mnt/data/per_cell_results/e4ddac12-f48f-4455-8e8d-c2a48a683437_ivfFlat_cosine_per_cell_results.csv ./local_results/cosine_per_cell_results.csv
-
-# Copy ontology analysis
-kubectl cp braingeneers/pvc-access-pod:/mnt/data/ontology_analysis/ontology_analysis_report.txt ./local_results/ontology_analysis_report.txt
-
-# Copy visualizations (if needed)
-kubectl cp braingeneers/pvc-access-pod:/mnt/data/visualizations ./local_results/visualizations
+# Copy entire run directory
+kubectl cp braingeneers/pvc-access-pod:/mnt/data/benchmark_results/{timestamp}/ ./local_results/
 ```
 
 ---
 
-## Step 12: Clean Up
+## Step 9: Understand Results
 
-### 12.1 Delete Access Pod (when done viewing results)
+### Results Directory Structure
+
+Each run creates a timestamped directory (same structure locally and on S3):
+
+```
+benchmark_results/{timestamp}/
+├── benchmark_results.csv              Summary metrics per index/metric/dataset
+├── benchmark.log                      Run log (warnings, filtered cells, timing)
+├── per_cell_results/
+│   └── {dataset}_{index}_{metric}_per_cell_results.csv
+├── ontology_analysis/
+│   └── ontology_analysis_report.txt
+└── visualizations/                    (if --generate-plots was used)
+```
+
+### Summary CSV Columns (`benchmark_results.csv`)
+
+| Column | Description |
+|--------|-------------|
+| Index | Index type (e.g., "ivfFlat") |
+| Metric | Distance metric (e.g., "euclidean") |
+| Dataset | Test dataset ID |
+| accuracy | Overall prediction accuracy (0-1) |
+| f1_macro | Macro-averaged F1 score |
+| f1_weighted | Weighted F1 score |
+| top_k_accuracy | Proportion where truth in top-k neighbors |
+| mean_ontology_similarity | Mean Lin similarity (0-1, **higher = more similar**). Default IC method. |
+| median_ontology_similarity | Median Lin similarity |
+| Avg_Query_Time_ms | Average query time per cell (milliseconds) |
+
+**Interpreting ontology similarity** (IC method, default):
+
+| Score | Meaning |
+|-------|---------|
+| **1.0** | Identical terms (perfect prediction) |
+| **> 0.8** | Closely related (e.g., neuron subtypes) |
+| **0.4 - 0.7** | Moderately related (e.g., neuron vs. astrocyte) |
+| **~0.0** | Unrelated |
+
+If `--ontology-method shortest_path` was used instead, the columns are
+`mean_ontology_dist` / `median_ontology_dist` (lower = more similar).
+
+### Per-Cell CSV Columns
+
+| Column | Description |
+|--------|-------------|
+| cell_id | Cell identifier |
+| true_label | Ground truth ontology term ID |
+| true_label_readable | Human-readable cell type name |
+| prediction_label | Predicted ontology term ID |
+| prediction_label_readable | Human-readable predicted name |
+| vote_percentage | Fraction of k neighbors that voted for the prediction |
+| mean_euclidean_distance | Mean FAISS distance to all k neighbors |
+| nearest_neighbor_euclidean_distance | Distance to the closest neighbor |
+| ontology_distance | Ontology score between prediction and truth |
+| avg_neighbor_ontology_distance | Mean ontology score across all neighbors vs truth |
+
+---
+
+## Step 10: Clean Up
+
+### 10.1 Delete Access Pod (when done viewing results)
 ```bash
 kubectl delete pod pvc-access-pod -n braingeneers
 ```
 
-### 12.2 Delete Completed Job (optional, to free resources)
+### 10.2 Delete Completed Job (optional, to free resources)
 ```bash
 kubectl delete job uce-benchmark-job -n braingeneers
 ```
 
-**Note**: Results remain in PVC, so you can recreate the access pod anytime to view them again.
+**Note**: Results remain in PVC and S3, so you can access them anytime.
 
 ---
 
 ## Quick Reference: All Commands in One Place
 
 ```bash
-# 1. Build
-cd /Users/Suhas/FoundationModelBenchmarking
+# 1. Build and push
+cd FoundationModelBenchmarking
 docker build --no-cache -t suhaso123/uce-benchmark:v1 .
-
-# 2. Push
 docker login
 docker push suhaso123/uce-benchmark:v1
 
-# 3. Deploy
+# 2. Deploy
 kubectl delete job uce-benchmark-job -n braingeneers 2>/dev/null; sleep 5
 kubectl apply -f benchmarking-job.yaml
 
-# 4. Monitor
+# 3. Monitor
 kubectl logs -n braingeneers -l job-name=uce-benchmark-job -f
 
-# 5. Check Status
+# 4. Check status
 kubectl get job uce-benchmark-job -n braingeneers
-kubectl get pods -n braingeneers -l job-name=uce-benchmark-job
 
-# 6. Access Results
+# 5. Get results from S3 (easiest)
+aws s3 ls s3://latentbrain/combined_UCE_5neuro/benchmark_results/
+aws s3 cp --recursive s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/ ./results/
+
+# 6. Or access via PVC pod
 kubectl apply -f pvc-access-pod.yaml
 kubectl wait --for=condition=Ready pod/pvc-access-pod -n braingeneers --timeout=60s
+kubectl exec -n braingeneers pvc-access-pod -- ls /mnt/data/benchmark_results/
+kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results/{timestamp}/benchmark_results.csv
 
-# 7. View Results
-kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results.csv
-kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_analysis_report.txt
-kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/per_cell_results/*_per_cell_results.csv
-
-# 8. Cleanup
+# 7. Cleanup
 kubectl delete pod pvc-access-pod -n braingeneers
 ```
 
@@ -376,7 +343,7 @@ kubectl delete pod pvc-access-pod -n braingeneers
 ## Troubleshooting
 
 ### Issue: Docker Build Fails
-**Solution**: 
+**Solution**:
 - Check Docker is running: `docker ps`
 - Check you're in the right directory
 - Try: `docker build --no-cache -t suhaso123/uce-benchmark:v1 .`
@@ -417,13 +384,13 @@ kubectl describe pod pvc-access-pod -n braingeneers
 **Solution**:
 - Check job completed successfully: `kubectl get job uce-benchmark-job -n braingeneers`
 - Check pod logs for errors: `kubectl logs -n braingeneers -l job-name=uce-benchmark-job`
-- Verify PVC is mounted correctly
+- Check the run log: look in `/mnt/data/benchmark_results/` for timestamped directories
 
-### Issue: kubectl Commands Fail with Authentication Error
+### Issue: S3 Upload Failed
 **Solution**:
-- This is a network/authentication issue with your kubectl config
-- Run commands in your local terminal (not through chat interface)
-- Check your kubeconfig: `kubectl config view`
+- Check AWS credentials are configured in the Kubernetes secret
+- Check pod logs for the specific error message
+- Results are still available on the PVC even if S3 upload fails
 
 ---
 
@@ -432,38 +399,5 @@ kubectl describe pod pvc-access-pod -n braingeneers
 - **Docker Build**: 5-10 minutes (first time), 1-2 minutes (cached)
 - **Docker Push**: 2-5 minutes (depends on network)
 - **Benchmark Execution**: 10-20 minutes (depends on dataset size)
+- **S3 Upload**: 1-2 minutes
 - **Total**: ~20-35 minutes end-to-end
-
----
-
-## What Gets Generated
-
-### Summary Files
-- `benchmark_results.csv`: Aggregate metrics per index/metric combination
-- `summary_table.csv`: Summary statistics
-
-### Detailed Files
-- `*_per_cell_results.csv`: Predictions for each cell (one file per index/metric)
-- `ontology_analysis_report.txt`: Comprehensive ontology distance analysis
-- `ontology_distance_accuracy_relationship.csv`: Distance vs accuracy correlation
-
-### Visualizations
-- `*_umap_ground_truth.png`: UMAP colored by true cell types
-- `*_umap_predictions.png`: UMAP colored by predictions
-- `*_umap_errors.png`: UMAP colored by error magnitude
-- `*_confusion_matrix.png`: Confusion matrix heatmap
-- `ontology_distance_analysis.png`: Distance distribution plots
-
----
-
-## Next Steps After Viewing Results
-
-1. **Compare Results**: Compare new results with previous runs
-2. **Analyze Errors**: Look at cells with distance ≥ 1 to understand error patterns
-3. **Check Visualizations**: Review UMAP plots and confusion matrix
-4. **Update Documentation**: Update results summary if needed
-5. **Share Results**: Use results for presentations or reports
-
----
-
-*This guide covers the complete workflow from building to viewing results. For technical details, see TECHNICAL_WALKTHROUGH.md*

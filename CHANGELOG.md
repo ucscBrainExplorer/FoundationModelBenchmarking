@@ -2,6 +2,53 @@
 
 ---
 
+## 2026-02-10 — Add S3 upload, timestamped results, and documentation updates
+
+**Commit:** `fd4fdab` on branch `review/student-code-fixes`
+
+### Modified files (5)
+
+#### `main_benchmark.py` — timestamped results + S3 upload + logging fix
+
+- All results now write to `{DATA_ROOT}/benchmark_results/{timestamp}/` instead of flat in `DATA_ROOT`. Each run is isolated; previous results are never overwritten.
+- Replaced `# TODO: Add file to s3 - Suhas` with actual S3 upload. Results upload automatically to `s3://{bucket}/{prefix}/benchmark_results/{timestamp}/` after each run.
+- New `--no-upload` CLI flag to skip S3 upload independently of `--no-s3`.
+- Moved `logging.basicConfig` after `DATA_ROOT` definition; log file now writes into the timestamped results directory.
+
+#### `data_loader.py` — S3 upload function
+
+- `_get_s3_client()` — reusable S3 client creation (env vars on cluster, AWS profile locally).
+- `upload_results_to_s3(bucket, prefix, results_dir, timestamp)` — walks the local results directory and uploads all files to S3 under the same timestamped structure.
+
+#### `README.md` — updated for current code
+
+- Removed cosine from supported metrics; updated `ontology_utils.py` module description.
+- Replaced Ontology-Aware Metrics section with both IC and shortest-path documentation, including score interpretation table (**higher = more similar** for IC).
+- Updated output columns table with `mean/median_ontology_similarity`.
+- Added `--ontology-method` and `--no-upload` CLI examples.
+- Replaced Generated Results section with full directory tree (local + S3) and retrieval commands.
+- Updated Quick Start with timestamped paths and S3 download instructions.
+- Added Lin (1998) and Zhou (2008) to References.
+
+#### `IC_FORMULA_ANALYSIS.md` — correlation analysis
+
+- New section: "Correlation Between IC Similarity and Shortest-Path Distance"
+  - Pearson r = -0.34, Spearman r = -0.47 (moderately anti-correlated)
+  - Mean IC similarity at each path distance (1–17)
+  - Interpretation: high variance at mid-range, diminishing sensitivity at long range, IC captures implicit edge weight
+  - Reproducibility note (3,434 CL terms, 2,000 pairs, seed=42)
+
+#### `HOW_TO_RUN.md` — rewritten for current code
+
+- Removed hardcoded student path (`/Users/Suhas/...`).
+- All result paths updated to `benchmark_results/{timestamp}/`.
+- Step 8 reorganized into 3 retrieval options: S3 download (recommended), PVC pod, kubectl cp.
+- New Step 9: results directory structure, summary and per-cell CSV column descriptions, similarity interpretation table.
+- Added S3 upload to log monitoring messages and troubleshooting.
+- Removed references to nonexistent `TECHNICAL_WALKTHROUGH.md` and cosine metric.
+
+---
+
 ## 2026-02-10 — Fix 6 logic bugs and add IC-based ontology similarity metric
 
 **Commit:** `25bb1d0` on branch `review/student-code-fixes`

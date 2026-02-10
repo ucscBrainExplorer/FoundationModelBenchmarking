@@ -6,15 +6,7 @@ import numpy as np
 from typing import List, Dict
 import time
 
-# Configure file logging
-logging.basicConfig(
-    filename='benchmark.log',
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-from data_loader import load_faiss_index, load_reference_annotations, load_test_batch, download_data_from_s3
+from data_loader import load_faiss_index, load_reference_annotations, load_test_batch, download_data_from_s3, upload_results_to_s3
 from prediction_module import execute_query, vote_neighbors
 from ontology_utils import load_ontology, precompute_ic, score_batch, calculate_per_cell_distances, calculate_avg_neighbor_distances
 from evaluation_metrics import calculate_accuracy
@@ -28,6 +20,22 @@ except ImportError:
 # Default Configuration
 # Use /data for Kubernetes, fallback to relative paths for local development
 DATA_ROOT = "/data" if os.path.exists("/data") else "."
+
+# Create timestamped results directory (mirrors S3 structure)
+from datetime import datetime
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+RESULTS_DIR = os.path.join(DATA_ROOT, "benchmark_results", TIMESTAMP)
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# Configure file logging (writes into the timestamped results directory)
+LOG_PATH = os.path.join(RESULTS_DIR, "benchmark.log")
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 DEFAULT_TEST_DIR = os.path.join(DATA_ROOT, "test_data") if DATA_ROOT != "." else "test_data/"
 DEFAULT_INDEX_DIR = os.path.join(DATA_ROOT, "indices") if DATA_ROOT != "." else "indices/"
 DEFAULT_REF_ANNOTATION = os.path.join(DATA_ROOT, "reference_data", "prediction_obs.tsv") if DATA_ROOT != "." else "reference_data/prediction_obs.tsv"
@@ -45,7 +53,8 @@ def run_benchmark(
     s3_prefix: str = "combined_UCE_5neuro/",
     generate_plots: bool = False,
     output_dir: str = None,
-    ontology_method: str = 'ic'
+    ontology_method: str = 'ic',
+    upload_s3: bool = True
 ):
     """
     Orchestrate the benchmarking process.
@@ -403,7 +412,7 @@ def run_benchmark(
                     # Save per-cell results to CSV
                     print(f"    Preparing to save per-cell results for {len(predictions)} cells...")
                     try:
-                        per_cell_output_dir = os.path.join(DATA_ROOT, "per_cell_results") if DATA_ROOT != "." else "per_cell_results"
+                        per_cell_output_dir = os.path.join(RESULTS_DIR, "per_cell_results")
                         os.makedirs(per_cell_output_dir, exist_ok=True)
                         per_cell_filename = f"{ds_id}_{index_name}_{metric}_per_cell_results.csv"
                         per_cell_path = os.path.join(per_cell_output_dir, per_cell_filename)
@@ -446,14 +455,14 @@ def run_benchmark(
         print(df_results.to_string())
         
         # Save to file
-        results_path = os.path.join(DATA_ROOT, "benchmark_results.csv") if DATA_ROOT != "." else "benchmark_results.csv"
+        results_path = os.path.join(RESULTS_DIR, "benchmark_results.csv")
         df_results.to_csv(results_path, index=False)
         print(f"\nResults saved to {results_path}")
         
         # Generate visualizations if requested
         if generate_plots and VISUALIZATION_AVAILABLE:
             if embeddings_dict:
-                viz_output_dir = output_dir if output_dir else os.path.join(DATA_ROOT, "visualizations") if DATA_ROOT != "." else "visualizations"
+                viz_output_dir = output_dir if output_dir else os.path.join(RESULTS_DIR, "visualizations")
                 print(f"\nGenerating visualizations...")
                 print(f"Using best configuration: {best_config['index_name']} with {best_config['metric']} metric")
                 
@@ -483,8 +492,8 @@ def run_benchmark(
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                 from analyze_ontology_results import load_per_cell_results, calculate_ontology_statistics, generate_summary_report, analyze_distance_metric_relationship
                 
-                per_cell_dir = os.path.join(DATA_ROOT, "per_cell_results") if DATA_ROOT != "." else "per_cell_results"
-                analysis_dir = os.path.join(DATA_ROOT, "ontology_analysis") if DATA_ROOT != "." else "ontology_analysis"
+                per_cell_dir = os.path.join(RESULTS_DIR, "per_cell_results")
+                analysis_dir = os.path.join(RESULTS_DIR, "ontology_analysis")
                 
                 if os.path.exists(per_cell_dir):
                     df_per_cell = load_per_cell_results(per_cell_dir)
@@ -501,7 +510,15 @@ def run_benchmark(
                 import traceback
                 traceback.print_exc()
         
-        # TODO: Add file to s3 - Suhas
+        # Upload results to S3
+        if upload_s3:
+            print(f"\nUploading results to s3://{s3_bucket}/{s3_prefix.rstrip('/')}/benchmark_results/{TIMESTAMP}/...")
+            try:
+                s3_uri = upload_results_to_s3(s3_bucket, s3_prefix, RESULTS_DIR, TIMESTAMP)
+                print(f"Results available at {s3_uri}")
+            except Exception as e:
+                print(f"Warning: S3 upload failed: {e}")
+                logger.error(f"S3 upload failed: {e}")
     else:
         print("\nNo results generated.")
 
@@ -519,6 +536,8 @@ if __name__ == "__main__":
     parser.add_argument("--ontology-method", type=str, default="ic", choices=["ic", "shortest_path"],
                         help="Ontology scoring method: 'ic' for Lin similarity with Zhou IC (default), "
                              "'shortest_path' for shortest undirected path distance")
+    parser.add_argument("--no-upload", action="store_true",
+                        help="Skip uploading results to S3 (upload is on by default when S3 is enabled)")
     
     args = parser.parse_args()
     
@@ -530,14 +549,15 @@ if __name__ == "__main__":
     }
     
     run_benchmark(
-        index_paths, 
-        args.ref_annot, 
-        args.test_dir, 
-        args.obo, 
+        index_paths,
+        args.ref_annot,
+        args.test_dir,
+        args.obo,
         download_s3=not args.no_s3,
         s3_bucket=args.s3_bucket,
         s3_prefix=args.s3_prefix,
         generate_plots=args.generate_plots,
         output_dir=args.output_dir,
-        ontology_method=args.ontology_method
+        ontology_method=args.ontology_method,
+        upload_s3=not args.no_s3 and not args.no_upload
     )

@@ -1,10 +1,13 @@
 import os
+import logging
 import faiss
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Dict
 import boto3
 from botocore.exceptions import NoCredentialsError
+
+logger = logging.getLogger(__name__)
 
 def load_faiss_index(path: str, index_type: str = 'ivfFlat') -> faiss.Index:
     """
@@ -216,3 +219,56 @@ def download_data_from_s3(bucket: str, prefix: str, local_dir: str, profile_name
                 
     except Exception as e:
         raise RuntimeError(f"Error downloading from S3: {e}")
+
+
+def _get_s3_client(profile_name: str = 'braingeneers'):
+    """Create an S3 client using env vars (cluster) or AWS profile (local)."""
+    if os.environ.get('AWS_ACCESS_KEY_ID') and os.environ.get('AWS_SECRET_ACCESS_KEY'):
+        return boto3.client(
+            's3',
+            aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
+            aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'])
+    try:
+        session = boto3.Session(profile_name=profile_name)
+        return session.client('s3')
+    except Exception:
+        return boto3.client('s3')
+
+
+def upload_results_to_s3(bucket: str, prefix: str, results_dir: str,
+                         timestamp: str, profile_name: str = 'braingeneers') -> str:
+    """
+    Upload benchmark results to S3.
+
+    Uploads all files in results_dir to
+    s3://{bucket}/{prefix}/benchmark_results/{timestamp}/.
+
+    Args:
+        bucket (str): S3 bucket name.
+        prefix (str): S3 key prefix (e.g. 'combined_UCE_5neuro/').
+        results_dir (str): Local timestamped results directory to upload.
+        timestamp (str): Run timestamp (matches the local directory name).
+        profile_name (str): AWS profile for local runs.
+
+    Returns:
+        str: The S3 URI where results were uploaded.
+    """
+    s3 = _get_s3_client(profile_name)
+
+    results_prefix = f"{prefix.rstrip('/')}/benchmark_results/{timestamp}"
+
+    uploaded_count = 0
+    for root, _dirs, files in os.walk(results_dir):
+        for fname in files:
+            local_file = os.path.join(root, fname)
+            rel = os.path.relpath(local_file, results_dir)
+            s3_key = f"{results_prefix}/{rel}"
+            logger.info(f"Uploading {local_file} -> s3://{bucket}/{s3_key}")
+            print(f"  Uploading {rel}")
+            s3.upload_file(local_file, bucket, s3_key)
+            uploaded_count += 1
+
+    s3_uri = f"s3://{bucket}/{results_prefix}/"
+    print(f"  {uploaded_count} files uploaded to {s3_uri}")
+    logger.info(f"Uploaded {uploaded_count} files to {s3_uri}")
+    return s3_uri
