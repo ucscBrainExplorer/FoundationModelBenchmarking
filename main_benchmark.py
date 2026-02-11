@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import logging
 import pandas as pd
@@ -18,16 +19,16 @@ except ImportError:
     print("Warning: Visualization dependencies not available. Install with: pip install matplotlib seaborn umap-learn")
 
 # Default Configuration
-# Use /data for Kubernetes, fallback to relative paths for local development
-DATA_ROOT = "/data" if os.path.exists("/data") else "."
-
-# Create timestamped results directory (mirrors S3 structure)
+# Create timestamped results in a temp directory first;
+# after the run, results are uploaded to S3 (cluster) or moved locally (--no-s3).
+import tempfile
+import shutil
 from datetime import datetime
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
-RESULTS_DIR = os.path.join(DATA_ROOT, "benchmark_results", TIMESTAMP)
+RESULTS_DIR = os.path.join(tempfile.gettempdir(), "benchmark_results", TIMESTAMP)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Configure file logging (writes into the timestamped results directory)
+# Configure file logging (writes into the temp results directory)
 LOG_PATH = os.path.join(RESULTS_DIR, "benchmark.log")
 logging.basicConfig(
     filename=LOG_PATH,
@@ -36,10 +37,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_TEST_DIR = os.path.join(DATA_ROOT, "test_data") if DATA_ROOT != "." else "test_data/"
-DEFAULT_INDEX_DIR = os.path.join(DATA_ROOT, "indices") if DATA_ROOT != "." else "indices/"
-DEFAULT_REF_ANNOTATION = os.path.join(DATA_ROOT, "reference_data", "prediction_obs.tsv") if DATA_ROOT != "." else "reference_data/prediction_obs.tsv"
-DEFAULT_OBO_PATH = os.path.join(DATA_ROOT, "reference_data", "cl.obo") if DATA_ROOT != "." else "reference_data/cl.obo"
+DEFAULT_TEST_DIR = "test_data"
+DEFAULT_INDEX = "indices/index_ivfflat.faiss"
+DEFAULT_REF_ANNOTATION = "reference_data/prediction_obs.tsv"
+DEFAULT_OBO_PATH = "reference_data/cl.obo"
 
 def run_benchmark(
     index_paths: Dict[str, str],
@@ -49,102 +50,83 @@ def run_benchmark(
     metrics: List[str] = ['euclidean'],
     k: int = 30,
     download_s3: bool = True,
-    s3_bucket: str = "latentbrain",
-    s3_prefix: str = "combined_UCE_5neuro/",
+    s3_bucket: str = None,
+    s3_prefix: str = None,
     generate_plots: bool = False,
     output_dir: str = None,
-    ontology_method: str = 'ic',
-    upload_s3: bool = True
+    ontology_method: str = 'ic'
 ):
     """
     Orchestrate the benchmarking process.
     """
+    # Validate S3 arguments
+    if download_s3 and (not s3_bucket or not s3_prefix):
+        raise ValueError(
+            "--s3_bucket and --s3_prefix are required for S3. "
+            "Use --no-s3 to run without S3."
+        )
+
     # 0. S3 Download (Optional)
+    # Downloads from s3://{bucket}/{prefix}/ and places files at the paths
+    # specified by the CLI arguments (--index, --ref_annot, --obo, --test_dir).
     if download_s3:
-        # Check if data already exists
-        download_root = "/data" if os.path.exists("/data") else "data"
-        indices_dir = os.path.join(download_root, "indices")
-        reference_dir = os.path.join(download_root, "reference_data")
-        test_data_dir = os.path.join(download_root, "test_data")
-        
-        index_file = os.path.join(indices_dir, "index_ivfflat.faiss")
-        ref_file = os.path.join(reference_dir, "prediction_obs.tsv")
-        
+        index_path = list(index_paths.values())[0]
+
         # Check if required files already exist
-        if os.path.exists(index_file) and os.path.exists(ref_file):
+        if os.path.exists(index_path) and os.path.exists(ref_annotation_path):
             print("✓ Required data files already exist, skipping S3 download.")
-            print(f"  Index: {index_file}")
-            print(f"  Reference: {ref_file}")
+            print(f"  Index: {index_path}")
+            print(f"  Reference: {ref_annotation_path}")
         else:
-            print("Attempting to download data from S3...")
+            print(f"Downloading from s3://{s3_bucket}/{s3_prefix} ...")
             try:
-                # Test if download directory is writable
-                os.makedirs(download_root, exist_ok=True)
-                test_file = os.path.join(download_root, ".write_test")
-                try:
-                    with open(test_file, 'w') as f:
-                        f.write("test")
-                    os.remove(test_file)
-                except Exception as e:
-                    raise RuntimeError(f"Cannot write to {download_root}: {e}")
-                
-                # Download to a temporary location first, then reorganize
-                temp_download_dir = os.path.join(download_root, "_temp_download")
-                
-                print(f"Downloading from s3://{s3_bucket}/{s3_prefix} to {temp_download_dir}...")
+                temp_download_dir = os.path.join(tempfile.gettempdir(), "_s3_download")
                 download_data_from_s3(s3_bucket, s3_prefix, temp_download_dir)
-            
-                # Reorganize downloaded files to match expected structure
-                print("Reorganizing downloaded files...")
-                
-                # Create expected directory structure
-                os.makedirs(indices_dir, exist_ok=True)
-                os.makedirs(reference_dir, exist_ok=True)
-                os.makedirs(test_data_dir, exist_ok=True)
-            
-                # Move index file
-                temp_index = os.path.join(temp_download_dir, "index_ivfflat.faiss")
-                final_index = os.path.join(indices_dir, "index_ivfflat.faiss")
-                if os.path.exists(temp_index) and not os.path.exists(final_index):
-                    print(f"Moving index: {temp_index} -> {final_index}")
-                    os.rename(temp_index, final_index)
-                
-                # Move reference annotations
-                temp_ref = os.path.join(temp_download_dir, "prediction_obs.tsv")
-                final_ref = os.path.join(reference_dir, "prediction_obs.tsv")
-                if os.path.exists(temp_ref) and not os.path.exists(final_ref):
-                    print(f"Moving reference annotations: {temp_ref} -> {final_ref}")
-                    os.rename(temp_ref, final_ref)
-                
-                # Move test directory
+
+                # Move downloaded files to the paths expected by CLI arguments.
+                # S3 layout:  {prefix}/index_ivfflat.faiss
+                #              {prefix}/prediction_obs.tsv
+                #              {prefix}/cl.obo
+                #              {prefix}/test/{dataset_id}_*.npy
+                #              {prefix}/test/{dataset_id}_prediction_obs.tsv
+
+                # Index file → --index path
+                index_filename = os.path.basename(index_path)
+                temp_index = os.path.join(temp_download_dir, index_filename)
+                if os.path.exists(temp_index) and not os.path.exists(index_path):
+                    os.makedirs(os.path.dirname(index_path) or '.', exist_ok=True)
+                    print(f"  {index_filename} -> {index_path}")
+                    os.rename(temp_index, index_path)
+
+                # Reference annotations → --ref_annot path
+                ref_filename = os.path.basename(ref_annotation_path)
+                temp_ref = os.path.join(temp_download_dir, ref_filename)
+                if os.path.exists(temp_ref) and not os.path.exists(ref_annotation_path):
+                    os.makedirs(os.path.dirname(ref_annotation_path) or '.', exist_ok=True)
+                    print(f"  {ref_filename} -> {ref_annotation_path}")
+                    os.rename(temp_ref, ref_annotation_path)
+
+                # OBO ontology → --obo path
+                obo_filename = os.path.basename(obo_path)
+                temp_obo = os.path.join(temp_download_dir, obo_filename)
+                if os.path.exists(temp_obo) and not os.path.exists(obo_path):
+                    os.makedirs(os.path.dirname(obo_path) or '.', exist_ok=True)
+                    print(f"  {obo_filename} -> {obo_path}")
+                    os.rename(temp_obo, obo_path)
+
+                # Test data (test/ in S3) → --test_dir path
                 temp_test = os.path.join(temp_download_dir, "test")
                 if os.path.exists(temp_test):
-                    # Move contents of test/ to test_data/
+                    os.makedirs(test_dir, exist_ok=True)
                     for item in os.listdir(temp_test):
                         src = os.path.join(temp_test, item)
-                        dst = os.path.join(test_data_dir, item)
+                        dst = os.path.join(test_dir, item)
                         if not os.path.exists(dst):
-                            print(f"Moving test file: {src} -> {dst}")
+                            print(f"  test/{item} -> {dst}")
                             os.rename(src, dst)
-                    # Remove empty test directory
-                    try:
-                        os.rmdir(temp_test)
-                    except:
-                        pass
-                
+
                 # Clean up temp directory
-                try:
-                    # Remove any remaining files in temp directory
-                    for item in os.listdir(temp_download_dir):
-                        item_path = os.path.join(temp_download_dir, item)
-                        if os.path.isfile(item_path):
-                            os.remove(item_path)
-                        elif os.path.isdir(item_path):
-                            import shutil
-                            shutil.rmtree(item_path)
-                    os.rmdir(temp_download_dir)
-                except Exception as e:
-                    print(f"Error cleaning up temporary download directory: {e}")
+                shutil.rmtree(temp_download_dir, ignore_errors=True)
                 
             except Exception as e:
                 print(f"❌ S3 Download failed: {e}")
@@ -510,44 +492,51 @@ def run_benchmark(
                 import traceback
                 traceback.print_exc()
         
-        # Upload results to S3
-        if upload_s3:
+        # Persist results: upload to S3 if enabled, otherwise save locally
+        if download_s3:
             print(f"\nUploading results to s3://{s3_bucket}/{s3_prefix.rstrip('/')}/benchmark_results/{TIMESTAMP}/...")
             try:
                 s3_uri = upload_results_to_s3(s3_bucket, s3_prefix, RESULTS_DIR, TIMESTAMP)
                 print(f"Results available at {s3_uri}")
+                shutil.rmtree(RESULTS_DIR, ignore_errors=True)
             except Exception as e:
-                print(f"Warning: S3 upload failed: {e}")
+                print(f"WARNING: S3 upload failed: {e}")
+                print(f"Results are still in temp directory: {RESULTS_DIR}")
                 logger.error(f"S3 upload failed: {e}")
+        else:
+            final_dir = os.path.join("benchmark_results", TIMESTAMP)
+            os.makedirs(os.path.dirname(final_dir), exist_ok=True)
+            shutil.move(RESULTS_DIR, final_dir)
+            print(f"\nResults saved to {final_dir}")
     else:
         print("\nNo results generated.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Benchmarking")
-    parser.add_argument("--indices_config", type=str, help="Path to a text file mapping name:path for indices")
+    parser.add_argument("--index", type=str, default=DEFAULT_INDEX,
+                        help="Path to FAISS index file (default: indices/index_ivfflat.faiss)")
     parser.add_argument("--test_dir", type=str, default=DEFAULT_TEST_DIR)
     parser.add_argument("--ref_annot", type=str, default=DEFAULT_REF_ANNOTATION)
     parser.add_argument("--obo", type=str, default=DEFAULT_OBO_PATH)
     parser.add_argument("--no-s3", action="store_true", help="Skip downloading data from S3")
-    parser.add_argument("--s3_bucket", type=str, default="latentbrain")
-    parser.add_argument("--s3_prefix", type=str, default="combined_UCE_5neuro/")
+    parser.add_argument("--s3_bucket", type=str, default=None,
+                        help="S3 bucket name (required unless --no-s3)")
+    parser.add_argument("--s3_prefix", type=str, default=None,
+                        help="S3 key prefix, e.g. 'combined_UCE_5neuro/' (required unless --no-s3)")
     parser.add_argument("--generate-plots", action="store_true", help="Generate UMAP plots and confusion matrices")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for visualization outputs (default: visualizations/)")
     parser.add_argument("--ontology-method", type=str, default="ic", choices=["ic", "shortest_path"],
                         help="Ontology scoring method: 'ic' for Lin similarity with Zhou IC (default), "
                              "'shortest_path' for shortest undirected path distance")
-    parser.add_argument("--no-upload", action="store_true",
-                        help="Skip uploading results to S3 (upload is on by default when S3 is enabled)")
-    
     args = parser.parse_args()
     
-    # Simple default indices if no config provided
-    # Ideally should read from args.indices_config or construct default paths
-    index_paths = {
-        "ivfFlat": os.path.join(DEFAULT_INDEX_DIR, "index_ivfflat.faiss"),
-        # "ivfPQ": os.path.join(DEFAULT_INDEX_DIR, "index_ivfpq.faiss") # Example
-    }
-    
+    index_file = args.index
+    if not os.path.exists(index_file):
+        print(f"ERROR: FAISS index not found: {index_file}")
+        sys.exit(1)
+    index_name = os.path.basename(index_file).replace(".faiss", "").replace("index_", "")
+    index_paths = {index_name: index_file}
+
     run_benchmark(
         index_paths,
         args.ref_annot,
@@ -558,6 +547,5 @@ if __name__ == "__main__":
         s3_prefix=args.s3_prefix,
         generate_plots=args.generate_plots,
         output_dir=args.output_dir,
-        ontology_method=args.ontology_method,
-        upload_s3=not args.no_s3 and not args.no_upload
+        ontology_method=args.ontology_method
     )

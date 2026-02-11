@@ -1,22 +1,22 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: uce-benchmark-job
+  name: fm-benchmark-job
   namespace: braingeneers
 spec:
   template:
     spec:
       containers:
       - name: benchmark
-        image: suhaso123/uce-benchmark:v1
+        image: jzhu647/fm_benchmark:latest
         imagePullPolicy: Always
         command: ["python3", "main_benchmark.py"]
         args: [
-          "--test_dir", "/data/test_data",
-          "--ref_annot", "/data/reference_data/prediction_obs.tsv",
-          "--obo", "/data/reference_data/cl.obo",
-          "--generate-plots",
-          "--output-dir", "/data/visualizations"
+          "--test_dir", "test_data",
+          "--ref_annot", "prediction_obs.tsv",
+          "--obo", "cl.obo",
+          "--s3_bucket", "latentbrain",
+          "--s3_prefix", "combined_UCE_5neuro/"
         ]
         resources:
           requests:
@@ -25,9 +25,6 @@ spec:
           limits:
             memory: "64Gi"
             cpu: "4"
-        volumeMounts:
-        - name: data-volume
-          mountPath: /data
         env:
         - name: PYTHONUNBUFFERED
           value: "1"
@@ -44,7 +41,3 @@ spec:
       restartPolicy: Never
       nodeSelector:
         kubernetes.io/arch: arm64
-      volumes:
-      - name: data-volume
-        persistentVolumeClaim:
-          claimName: benchmark-data-pvc

@@ -57,93 +57,49 @@ def load_reference_annotations(path: str) -> pd.DataFrame:
 
 def load_test_batch(test_dir: str) -> List[Dict[str, str]]:
     """
-    Iterate through the test/ directory to discover datasets.
-    
+    Discover test datasets in a directory by matching file pairs.
+
+    Expected naming convention — for each dataset, two files:
+        {dataset_id}_prediction_obs.tsv   — ground truth cell type labels
+        {dataset_id}_*.npy                — foundation model embeddings
+
+    The dataset_id is extracted from the TSV filename (everything before
+    ``_prediction_obs.tsv``).  The corresponding .npy file is any ``.npy``
+    file whose name starts with the same dataset_id.
+
+    Example::
+
+        test_data/
+        ├── organoid_embeddings.npy
+        ├── organoid_prediction_obs.tsv
+        ├── adult_brain_embeddings.npy
+        └── adult_brain_prediction_obs.tsv
+
     Args:
-        test_dir (str): Path to the test directory.
-        
+        test_dir: Path to the directory containing test files.
+
     Returns:
-        List[Dict[str, str]]: A list of dictionaries, where each dict contains paths 
-                              for 'embedding' and 'metadata' for a dataset.
+        A list of dicts, each with keys 'id', 'embedding_path', and
+        'metadata_path'.
     """
     if not os.path.exists(test_dir):
         raise FileNotFoundError(f"Test directory not found: {test_dir}")
-        
-    datasets = []
-    
-    # Simple discovery logic: look for pairs of {id}_{embedding}.npy and {id}_prediction_obs.tsv
-    # We'll list all .npy files and check for corresponding .tsv
-    
-    for filename in os.listdir(test_dir):
-        if filename.endswith('.npy'):
-            # Expected format: {dataset_id}_{embedding}.npy
-            # Note: The plan says "{dataset_id}_{embedding}.npy" but also implies we need to find the ID.
-            # Let's assume the suffix is always rigid or we split by first underscore if needed.
-            # However, simpler approach: if filename is "foo_embedding.npy", ID might be "foo".
-            # Plan says: "{dataset_id}_{embedding}.npy" and "{dataset_id}_prediction_obs.tsv"
-            # It might be safer to just look for matching prefixes if we knew the suffix exactly.
-            # Let's assume suffix is `_embeddings.npy` or just split extension. 
-            # Re-reading plan: "Embedding is {dataset_id}_{embedding}.npy" and "ground truth labels in {dataset_id}_prediction_obs.tsv"
-            # This is slightly ambiguous on the exact suffix part "{embedding}". 
-            # Let's assume we pair any .npy with a .tsv that shares the prefix before the last underscore?
-            # Or simpler: Look for files, if we find X.npy and Y.tsv, how do we match?
-            # Let's try to infer dataset_id. 
-            
-            # Let's try to match exactly what is likely there. 
-            # If we have `dataset1_embeddings.npy` and `dataset1_prediction_obs.tsv`. 
-            # We can strip `.npy` and check if there is a corresponding tsv.
-            
-            # Actually, let's look for the TSV files first as they might be more distinguishable with `_prediction_obs.tsv`
-            pass
-            
-    # Better approach given the ambiguity:
-    # Iterate all files, find those ending in `_prediction_obs.tsv`.
-    # Then look for a corresponding .npy file. 
-    # The plan says "Embedding is {dataset_id}_{embedding}.npy". This `{embedding}` might be a variable string?
-    # Or literal "embedding"? "Snapshot of s3://..." suggests standard naming.
-    # Let's assume we find `X_prediction_obs.tsv` and look for `X.npy` or `X_embedding.npy`.
-    # Ideally the function should be robust.
-    
+
     files = os.listdir(test_dir)
-    embeddings_map = {}
-    metadata_map = {}
-    
-    for f in files:
-        if f.endswith('.npy'):
-            embeddings_map[f] = os.path.join(test_dir, f)
-        elif f.endswith('.tsv') or f.endswith('.txt'): # assuming tsv content
-            metadata_map[f] = os.path.join(test_dir, f)
-            
-    # This is still tricky without knowing the exact naming convention. 
-    # Let's try to match by prefix. 
-    # If we have `organoid_embeddings.npy` and `organoid_prediction_obs.tsv`
-    # Common prefix `organoid`.
-    
-    # Going with a heuristic: 
-    # Identify unique dataset IDs from the TSV filenames (assuming they end in _prediction_obs.tsv)
-    
+    npy_files = {f for f in files if f.endswith('.npy')}
+
     dataset_pairs = []
-    
-    for meta_file in metadata_map:
-        if 'prediction_obs' in meta_file:
-            # extract dataset_id
-            # Ref: "{dataset_id}_prediction_obs.tsv"
-            dataset_id = meta_file.replace('_prediction_obs.tsv', '')
-            
-            # Now find the embedding file
-            # Ref: "{dataset_id}_{embedding}.npy" - implies literal or variable.
-            # We'll search for a .npy file that starts with dataset_id
-            
-            matching_npy = [k for k in embeddings_map.keys() if k.startswith(dataset_id) and k.endswith('.npy')]
-            
-            if matching_npy:
-                # Take the first one found, or warn if multiple?
-                # For now take the first.
-                dataset_pairs.append({
-                    'id': dataset_id,
-                    'embedding_path': embeddings_map[matching_npy[0]],
-                    'metadata_path': metadata_map[meta_file]
-                })
+    for f in sorted(files):
+        if not f.endswith('_prediction_obs.tsv'):
+            continue
+        dataset_id = f.replace('_prediction_obs.tsv', '')
+        matching_npy = sorted(n for n in npy_files if n.startswith(dataset_id))
+        if matching_npy:
+            dataset_pairs.append({
+                'id': dataset_id,
+                'embedding_path': os.path.join(test_dir, matching_npy[0]),
+                'metadata_path': os.path.join(test_dir, f)
+            })
 
     return dataset_pairs
 
@@ -196,6 +152,9 @@ def download_data_from_s3(bucket: str, prefix: str, local_dir: str, profile_name
                 key = obj['Key']
                 # Skip if it behaves like a folder (ends with /)
                 if key.endswith('/'):
+                    continue
+                # Skip previous benchmark results
+                if 'benchmark_results/' in key:
                     continue
                     
                 # Calculate local path relative to prefix

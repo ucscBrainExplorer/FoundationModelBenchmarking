@@ -2,6 +2,27 @@
 
 ---
 
+## 2026-02-10 — Simplify S3/local workflow, clean up CLI args and docs
+
+**Commit:** `0cc8922` on branch `review/student-code-fixes`
+
+### Summary
+
+Simplified to two modes: S3 (cluster) or local (`--no-s3`). Removed PVC support, `--results-dest`, and `DATA_ROOT` detection. S3 download/upload is now automatic unless `--no-s3`.
+
+### Changes
+
+- **`main_benchmark.py`** — Removed `--results-dest` and `DATA_ROOT`. S3 enabled = download + upload; `--no-s3` = local only. New `--index` arg (single file) replaces unused `--indices_config`. S3 download places files at CLI arg paths instead of hardcoded subdirectories. Now downloads `cl.obo` and all `.faiss` files. Removed baked-in S3 defaults.
+- **`data_loader.py`** — Cleaned up `load_test_batch()`: documented `{dataset_id}` naming convention, removed dead code. S3 download skips `benchmark_results/` keys.
+- **`benchmarking-job.yaml`** — Renamed job to `fm-benchmark-job`, image to `jzhu647/fm_benchmark:latest`. Simplified args to match S3 filenames. Removed PVC volume mount.
+- **`README.md`** — Trimmed to ~210 lines. Removed PVC, `--results-dest`, `--no-upload` references.
+- **`HOW_TO_RUN.md`** — Rewritten ~155 lines. Options table shows S3 source for each arg. Removed PVC sections.
+- **`requirements.txt`** / **`Dockerfile`** — Unpinned `faiss-cpu`.
+- **`run_benchmark.sh`** — Deleted.
+- **`pvc.yaml`** / **`pvc-access-pod.yaml`** — Deleted.
+
+---
+
 ## 2026-02-10 — Add S3 upload, timestamped results, and documentation updates
 
 **Commit:** `fd4fdab` on branch `review/student-code-fixes`

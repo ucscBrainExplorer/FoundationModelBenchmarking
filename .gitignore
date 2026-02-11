@@ -62,3 +62,5 @@ credentials
 # Documentation PDFs (can be added individually if needed)
 # Keeping the spec PDF out for now - can be added back if team needs it
 *.pdf
+
+useful_tips

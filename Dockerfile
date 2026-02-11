@@ -18,7 +18,7 @@ COPY requirements.txt .
 # Install numpy first (required for faiss-cpu)
 RUN pip install --no-cache-dir "numpy<2.0"
 # Install faiss-cpu with prefer-binary to use pre-built wheels
-RUN pip install --no-cache-dir --prefer-binary faiss-cpu==1.7.4
+RUN pip install --no-cache-dir --prefer-binary faiss-cpu
 # Install remaining dependencies
 RUN pip install --no-cache-dir --prefer-binary pandas scikit-learn pronto networkx boto3 matplotlib seaborn umap-learn
 
