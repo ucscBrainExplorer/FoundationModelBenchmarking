@@ -1,9 +1,11 @@
 import logging
+import math
+from collections import deque
 from typing import Dict, Optional, Tuple, List
 import statistics
 import pandas as pd
 
-# Try checking for networkx and pronto, but don't fail at module level 
+# Try checking for networkx and pronto, but don't fail at module level
 # to allow inspection of code even if deps are missing.
 try:
     import networkx as nx
@@ -12,41 +14,44 @@ except ImportError:
     nx = None
     pronto = None
 
+
 def load_ontology(obo_path: str) -> 'nx.DiGraph':
     """
     Load the Cell Ontology (CL) OBO file into a NetworkX DiGraph.
-    
+
     Args:
         obo_path (str): Path to the .obo file.
-        
+
     Returns:
         nx.DiGraph: Directed graph representing the ontology (edges point to parents/superclasses).
     """
     if pronto is None or nx is None:
         raise ImportError("pronto and networkx are required for ontology_utils.")
-        
+
     ont = pronto.Ontology(obo_path)
     g = nx.DiGraph()
-    
+
     for term in ont.terms():
         g.add_node(term.id, name=term.name)
         for superclass in term.superclasses(distance=1, with_self=False):
-            # In OBO, 'is_a' points to parent. 
-            # We want graph distance. Edge direction depends on how we calculate LCA/Distance.
-            # Usually child->parent is natural for 'is_a'.
             g.add_edge(term.id, superclass.id)
-            
+
     return g
 
-def calculate_graph_distance(graph: 'nx.DiGraph', predicted_id: str, truth_id: str) -> int:
-    """
-    Calculate the distance between predicted node and ground truth node.
-    Distance = shortest path in the undirected version of the graph.
-    The plan says: "via their Lowest Common Ancestor (LCA)."
-    Distance = dist(pred, LCA) + dist(truth, LCA).
 
-    For ontology graphs, we use the shortest path in the undirected graph,
-    which represents the semantic distance through the ontology hierarchy.
+# ---------------------------------------------------------------------------
+# Method 1: Shortest undirected path distance (original)
+# ---------------------------------------------------------------------------
+
+def calculate_graph_distance(graph: 'nx.DiGraph', predicted_id: str, truth_id: str,
+                             _undirected_cache: dict = {}) -> int:
+    """
+    Calculate the shortest-path distance between two terms in the ontology.
+
+    Converts the directed graph to undirected and finds the shortest path.
+    Note: on DAGs with multiple inheritance (like the Cell Ontology, where 33.5%
+    of terms have multiple parents), shortest undirected path can shortcut across
+    separate branches, potentially underestimating true semantic distance.
 
     Args:
         graph (nx.DiGraph): Ontology graph (edges: child -> parent).
@@ -60,106 +65,312 @@ def calculate_graph_distance(graph: 'nx.DiGraph', predicted_id: str, truth_id: s
         return 0
 
     if predicted_id not in graph or truth_id not in graph:
-        # If term not found, return -1 to indicate error/missing.
         return -1
 
-    # Convert to undirected graph for distance calculation
-    # This allows us to traverse both up and down the hierarchy
-    undirected_graph = graph.to_undirected()
+    # Cache the undirected conversion to avoid rebuilding per call
+    graph_id = id(graph)
+    if graph_id not in _undirected_cache:
+        _undirected_cache[graph_id] = graph.to_undirected()
+    undirected_graph = _undirected_cache[graph_id]
 
     try:
-        # Calculate shortest path in undirected graph
         distance = nx.shortest_path_length(undirected_graph, source=predicted_id, target=truth_id)
         return distance
     except nx.NetworkXNoPath:
-        # If no path exists (disconnected components), return -1
         return -1
     except Exception:
-        # Catch any other exceptions
         return -1
 
-def calculate_per_cell_distances(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str]) -> List[int]:
+
+# ---------------------------------------------------------------------------
+# Method 2: IC-based Lin similarity using Zhou (k=0.5) weighted IC
+#
+# This method computes semantic similarity between ontology terms using
+# Information Content (IC), which measures how specific/informative a term is.
+# Unlike path-based distance, IC-based similarity is well-defined on DAGs
+# with multiple inheritance and selects the Most Informative Common Ancestor
+# (MICA) rather than relying on ambiguous LCA.
+#
+# Two key references:
+#
+#   Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content
+#   for Semantic Similarity in WordNet. In 2008 Second International Conference
+#   on Future Generation Communication and Networking Symposia, Hainan, China,
+#   pp. 85-89. doi: 10.1109/FGCNS.2008.16.
+#
+#   Lin, D. (1998). An Information-Theoretic Definition of Similarity. In
+#   Proceedings of the 15th International Conference on Machine Learning
+#   (ICML 1998), Vol. 98, pp. 296-304.
+#
+# See IC_FORMULA_ANALYSIS.md for detailed evaluation of why Zhou k=0.5 was
+# chosen over Seco, Sanchez, and depth-only IC formulas.
+# ---------------------------------------------------------------------------
+
+def _get_all_ancestors(node: str, graph: 'nx.DiGraph') -> set:
+    """Get all ancestors of node (including self) by following edges toward parents."""
+    ancestors = {node}
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        for parent in graph.successors(current):
+            if parent not in ancestors:
+                ancestors.add(parent)
+                stack.append(parent)
+    return ancestors
+
+
+def _get_all_descendants(node: str, graph: 'nx.DiGraph') -> set:
+    """Get all descendants of node (including self) by following edges from children."""
+    descendants = {node}
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        for child in graph.predecessors(current):
+            if child not in descendants:
+                descendants.add(child)
+                stack.append(child)
+    return descendants
+
+
+def _get_shortest_depth(node: str, graph: 'nx.DiGraph', root: str = 'CL:0000000') -> int:
+    """Shortest path length from node to root following parent edges (BFS)."""
+    if node == root:
+        return 0
+    visited = {node}
+    queue = deque([(node, 0)])
+    while queue:
+        current, dist = queue.popleft()
+        for parent in graph.successors(current):
+            if parent == root:
+                return dist + 1
+            if parent not in visited:
+                visited.add(parent)
+                queue.append((parent, dist + 1))
+    return -1  # disconnected from root
+
+
+def precompute_ic(graph: 'nx.DiGraph', k: float = 0.5) -> Dict[str, float]:
     """
-    Calculate ontology distance for each cell individually.
+    Precompute Zhou (2008) weighted intrinsic IC for all terms in the ontology.
+
+        IC(t) = k * Seco_IC(t) + (1 - k) * depth_component(t)
+
+    where:
+        Seco_IC(t)        = 1 - log(|descendants(t)| + 1) / log(N)
+        depth_component(t) = log(depth(t) + 1) / log(max_depth + 1)
+
+    This blends descendant count (how many terms are subsumed) with structural
+    depth (how far from the root). With k=0.5, both contribute equally, producing
+    biologically intuitive IC values on the Cell Ontology — e.g., 'neuron' correctly
+    gets higher IC than 'secretory cell' despite having more descendants, because
+    neuron sits deeper in the hierarchy.
+
+    Reference:
+        Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content
+        for Semantic Similarity in WordNet. In 2008 Second International Conference
+        on Future Generation Communication and Networking Symposia, Hainan, China,
+        pp. 85-89. doi: 10.1109/FGCNS.2008.16.
+
+    Args:
+        graph (nx.DiGraph): Ontology graph (edges: child -> parent).
+        k (float): Weight for Seco component (default 0.5 = equal blend).
+
+    Returns:
+        Dict[str, float]: Mapping from term ID to IC value.
+    """
+    nodes = list(graph.nodes)
+    N = len(nodes)
+    if N <= 1:
+        return {n: 0.0 for n in nodes}
+
+    log_N = math.log(N)
+
+    # Precompute descendant counts and depths
+    desc_counts = {}
+    depths = {}
+    for node in nodes:
+        desc_counts[node] = len(_get_all_descendants(node, graph))
+        depths[node] = _get_shortest_depth(node, graph)
+
+    max_depth = max(d for d in depths.values() if d >= 0) if depths else 0
+    if max_depth == 0:
+        log_max_depth_plus1 = 1.0
+    else:
+        log_max_depth_plus1 = math.log(max_depth + 1)
+
+    ic_values = {}
+    for node in nodes:
+        seco = 1.0 - math.log(desc_counts[node] + 1) / log_N
+        d = depths[node] if depths[node] >= 0 else 0
+        depth_comp = math.log(d + 1) / log_max_depth_plus1
+        ic_values[node] = k * seco + (1.0 - k) * depth_comp
+
+    return ic_values
+
+
+def calculate_lin_similarity(graph: 'nx.DiGraph', predicted_id: str, truth_id: str,
+                             ic_values: Dict[str, float]) -> float:
+    """
+    Calculate Lin semantic similarity between two ontology terms.
+
+        Sim_Lin(A, B) = 2 * IC(MICA) / (IC(A) + IC(B))
+
+    where MICA = Most Informative Common Ancestor, the common ancestor with
+    the highest Information Content. Unlike LCA (Lowest Common Ancestor), MICA
+    is always uniquely defined — it picks the most specific shared ancestor
+    regardless of graph structure.
+
+    Result is in [0, 1] where 1 = identical terms, 0 = completely unrelated.
+
+    Reference:
+        Lin, D. (1998). An Information-Theoretic Definition of Similarity. In
+        Proceedings of the 15th International Conference on Machine Learning
+        (ICML 1998), Vol. 98, pp. 296-304.
+
+    Args:
+        graph (nx.DiGraph): Ontology graph (edges: child -> parent).
+        predicted_id (str): Predicted CL ID.
+        truth_id (str): Ground truth CL ID.
+        ic_values (Dict[str, float]): Precomputed IC values from precompute_ic().
+
+    Returns:
+        float: Lin similarity in [0, 1]. Returns -1.0 if either term is missing.
+    """
+    if predicted_id == truth_id:
+        return 1.0
+
+    if predicted_id not in graph or truth_id not in graph:
+        return -1.0
+
+    ic_a = ic_values.get(predicted_id, 0.0)
+    ic_b = ic_values.get(truth_id, 0.0)
+
+    if ic_a + ic_b == 0:
+        return 0.0
+
+    # Find MICA: common ancestor with highest IC
+    ancestors_a = _get_all_ancestors(predicted_id, graph)
+    ancestors_b = _get_all_ancestors(truth_id, graph)
+    common_ancestors = ancestors_a & ancestors_b
+
+    if not common_ancestors:
+        return 0.0
+
+    mica_ic = max(ic_values.get(a, 0.0) for a in common_ancestors)
+    return (2.0 * mica_ic) / (ic_a + ic_b)
+
+
+# ---------------------------------------------------------------------------
+# Unified scoring functions (support both methods via 'method' parameter)
+#
+#   method='shortest_path'  — shortest undirected path distance (lower = more similar)
+#   method='ic'    — Lin similarity with Zhou k=0.5 IC (higher = more similar)
+# ---------------------------------------------------------------------------
+
+def _compute_pairwise_score(graph, predicted_id, truth_id, method, ic_values=None):
+    """Compute a single pairwise ontology score using the chosen method.
+
+    Returns:
+        float or None: The score value, or None if it could not be computed.
+            For 'shortest_path': distance (int, lower = better). None when -1.
+            For 'ic': Lin similarity (float in [0,1], higher = better). None when -1.
+    """
+    if method == 'shortest_path':
+        dist = calculate_graph_distance(graph, predicted_id, truth_id)
+        return dist if dist >= 0 else None
+    elif method == 'ic':
+        if ic_values is None:
+            raise ValueError("ic_values must be provided when method='ic'")
+        sim = calculate_lin_similarity(graph, predicted_id, truth_id, ic_values)
+        return sim if sim >= 0 else None
+    else:
+        raise ValueError(f"Unknown ontology method: {method!r}. Use 'shortest_path' or 'ic'.")
+
+
+def score_batch(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str],
+                method: str = 'shortest_path', ic_values: Dict[str, float] = None) -> Tuple[float, float]:
+    """
+    Report Mean and Median ontology score for the dataset.
 
     Args:
         graph (nx.DiGraph): Ontology graph.
         predictions (List[str]): List of predicted IDs.
         ground_truth (List[str]): List of ground truth IDs.
+        method (str): 'shortest_path' for shortest-path distance, 'ic' for Lin similarity.
+        ic_values (Dict[str, float]): Precomputed IC values (required when method='ic').
 
     Returns:
-        List[int]: List of distances, one per cell. Returns -1 for cells where distance cannot be calculated.
+        Tuple[float, float]: (Mean, Median) of the scores.
+            For 'shortest_path': distance values (lower = more similar).
+            For 'ic': similarity values in [0,1] (higher = more similar).
     """
-    distances = []
-    for p, g in zip(predictions, ground_truth):
-        dist = calculate_graph_distance(graph, p, g)
-        distances.append(dist)
-    return distances
+    scores = []
 
-def calculate_avg_neighbor_distances(graph: 'nx.DiGraph', neighbor_labels: List[List[str]], ground_truth: List[str]) -> List[float]:
+    for p, g in zip(predictions, ground_truth):
+        score = _compute_pairwise_score(graph, p, g, method, ic_values)
+        if score is not None:
+            scores.append(score)
+
+    if not scores:
+        return float('nan'), float('nan')
+
+    return float(statistics.mean(scores)), float(statistics.median(scores))
+
+
+def calculate_per_cell_distances(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str],
+                                 method: str = 'shortest_path', ic_values: Dict[str, float] = None) -> List[float]:
     """
-    Calculate average ontology distance across all neighbors for each cell.
-    
-    For each cell, calculates the ontology distance between each neighbor's label
-    and the ground truth, then averages those distances.
-    
+    Calculate ontology score for each cell individually.
+
     Args:
         graph (nx.DiGraph): Ontology graph.
-        neighbor_labels (List[List[str]]): List of lists, where each inner list contains 
-                                          the labels of K neighbors for one cell.
-        ground_truth (List[str]): List of ground truth IDs, one per cell.
-    
+        predictions (List[str]): List of predicted IDs.
+        ground_truth (List[str]): List of ground truth IDs.
+        method (str): 'shortest_path' for shortest-path distance, 'ic' for Lin similarity.
+        ic_values (Dict[str, float]): Precomputed IC values (required when method='ic').
+
     Returns:
-        List[float]: Average distance across neighbors for each cell. 
+        List[float]: List of scores, one per cell. NaN for cells where score cannot be computed.
+    """
+    scores = []
+    for p, g in zip(predictions, ground_truth):
+        score = _compute_pairwise_score(graph, p, g, method, ic_values)
+        scores.append(score if score is not None else float('nan'))
+    return scores
+
+
+def calculate_avg_neighbor_distances(graph: 'nx.DiGraph', neighbor_labels: List[List[str]], ground_truth: List[str],
+                                     method: str = 'shortest_path', ic_values: Dict[str, float] = None) -> List[float]:
+    """
+    Calculate average ontology score across all neighbors for each cell.
+
+    Args:
+        graph (nx.DiGraph): Ontology graph.
+        neighbor_labels (List[List[str]]): List of lists of neighbor labels per cell.
+        ground_truth (List[str]): List of ground truth IDs, one per cell.
+        method (str): 'shortest_path' for shortest-path distance, 'ic' for Lin similarity.
+        ic_values (Dict[str, float]): Precomputed IC values (required when method='ic').
+
+    Returns:
+        List[float]: Average score across neighbors for each cell.
                     Returns np.nan if no valid neighbors found.
     """
     import numpy as np
-    
-    avg_distances = []
-    
+
+    avg_scores = []
+
     for neighbors, truth in zip(neighbor_labels, ground_truth):
-        neighbor_distances = []
-        
-        # Calculate distance for each neighbor
+        neighbor_scores = []
+
         for neighbor_label in neighbors:
-            # Skip invalid labels (empty, NaN, None)
             if neighbor_label and pd.notna(neighbor_label) and str(neighbor_label).strip() != '':
-                dist = calculate_graph_distance(graph, neighbor_label, truth)
-                if dist >= 0:  # Only count valid distances (not -1)
-                    neighbor_distances.append(dist)
-        
-        # Calculate average if we have valid distances
-        if len(neighbor_distances) > 0:
-            avg_dist = float(np.mean(neighbor_distances))
-            avg_distances.append(avg_dist)
+                score = _compute_pairwise_score(graph, neighbor_label, truth, method, ic_values)
+                if score is not None:
+                    neighbor_scores.append(score)
+
+        if len(neighbor_scores) > 0:
+            avg_scores.append(float(np.mean(neighbor_scores)))
         else:
-            # No valid neighbors, return NaN
-            avg_distances.append(np.nan)
-    
-    return avg_distances
+            avg_scores.append(np.nan)
 
-def score_batch(graph: 'nx.DiGraph', predictions: List[str], ground_truth: List[str]) -> Tuple[float, float]:
-    """
-    Report Mean and Median ontology distance for the dataset.
-
-    Args:
-        graph (nx.DiGraph): Ontology graph.
-        predictions (List[str]): List of predicted IDs.
-        ground_truth (List[str]): List of ground truth IDs.
-
-    Returns:
-        Tuple[float, float]: (Mean Distance, Median Distance)
-    """
-    distances = []
-
-    for p, g in zip(predictions, ground_truth):
-        dist = calculate_graph_distance(graph, p, g)
-        if dist >= 0:
-            distances.append(dist)
-        # Else: ignore or penalize? Ignoring for now to avoid skewing with errors.
-
-    if not distances:
-        return 0.0, 0.0
-
-    # Ensure we return floats
-    return float(statistics.mean(distances)), float(statistics.median(distances))
+    return avg_scores

@@ -7,100 +7,130 @@ A modular Python framework for benchmarking K-Nearest Neighbors (KNN) model accu
 This project benchmarks cell type prediction accuracy by comparing:
 - **Foundation models**: UCE, SCimilarity, etc.
 - **FAISS index types**: IVF Flat, IVF PQ
-- **Distance metrics**: Euclidean, Cosine
+- **Distance metrics**: Euclidean
 - **Test datasets**: Organoids, post-mortem adult brain, etc.
 
-The evaluation uses both standard metrics (accuracy, F1 score) and **biological distance metrics** based on Cell Ontology (CL) graph structures to measure how "close" predictions are to ground truth in the ontology hierarchy.
+The evaluation uses **ontology-aware metrics** based on Cell Ontology (CL) graph structures to measure how semantically "close" predictions are to ground truth in the biological hierarchy.
 
-## Quick Start
+---
 
-### Prerequisites
+## Three Standalone Programs
 
-- **Docker** installed and running
-- **kubectl** configured for your Kubernetes cluster
-- **Access to Kubernetes namespace**: `braingeneers` (or update namespace in YAML files)
-- **Docker Hub account** (for pushing images, or use a different registry)
+The benchmarking suite provides three composable programs for flexible workflows:
 
-### Running the Benchmark
+### 1. **`predict.py`** — Predict cell types
+Predict cell types using FAISS k-NN + majority voting. **No ground truth required.**
 
-1. **Build the Docker image**:
-   ```bash
-   cd FoundationModelBenchmarking
-   docker build --no-cache -t suhaso123/uce-benchmark:v1 .
-   ```
+```bash
+python3 predict.py \
+  --index indices/index_ivfflat.faiss \
+  --ref_annot reference_data/prediction_obs.tsv \
+  --obo reference_data/cl.obo \
+  --embeddings test_data/dataset.npy \
+  --output predictions.tsv
+```
 
-2. **Push to Docker Hub** (or your registry):
-   ```bash
-   docker login
-   docker push suhaso123/uce-benchmark:v1
-   ```
-   
-   **Note**: Update the image name (`suhaso123/uce-benchmark:v1`) in `benchmarking-job.yaml` if using a different registry.
+**Output:** `predictions.tsv` with predicted CL term IDs, readable names, vote confidence, and neighbor information.
 
-3. **Ensure PVC exists** (for storing results):
-   ```bash
-   kubectl get pvc benchmark-data-pvc -n braingeneers
-   # If missing, create it (see pvc.yaml or create manually)
-   ```
+### 2. **`evaluate.py`** — Evaluate predictions
+Evaluate predictions against ground truth using ontology-based semantic metrics.
 
-4. **Deploy the benchmark job**:
-   ```bash
-   kubectl delete job uce-benchmark-job -n braingeneers 2>/dev/null  # Delete old job if exists
-   kubectl apply -f benchmarking-job.yaml
-   ```
+```bash
+python3 evaluate.py \
+  --predictions predictions.tsv \
+  --ground_truth test_data/ground_truth.tsv \
+  --obo reference_data/cl.obo \
+  --ontology-method ic \
+  --output-dir evaluation_results/
+```
 
-5. **Monitor the job**:
-   ```bash
-   # Check job status
-   kubectl get job uce-benchmark-job -n braingeneers
-   
-   # Watch logs in real-time
-   kubectl logs -n braingeneers -l job-name=uce-benchmark-job -f
-   ```
+**Output:** Aggregate metrics, per-cell scores, detailed report, and visualizations.
 
-6. **Access results** (after job completes):
-   ```bash
-   # Create temporary pod to access PVC
-   kubectl apply -f pvc-access-pod.yaml
-   kubectl wait --for=condition=Ready pod/pvc-access-pod -n braingeneers --timeout=60s
-   
-   # View summary results
-   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/benchmark_results.csv
-   
-   # View detailed analysis
-   kubectl exec -n braingeneers pvc-access-pod -- cat /mnt/data/ontology_analysis/ontology_analysis_report.txt
-   
-   # View per-cell results sample
-   kubectl exec -n braingeneers pvc-access-pod -- head -50 /mnt/data/per_cell_results/*_per_cell_results.csv
-   
-   # Clean up access pod when done
-   kubectl delete pod pvc-access-pod -n braingeneers
-   ```
+**Works with any predictions**, not just from `predict.py` — accepts external tools or biologist annotations.
 
-### Expected Runtime
+### 3. **`annotate_cl_terms.py`** — Map names → CL IDs
+Map readable cell type names to CL ontology term IDs for external predictions.
 
-- **Docker Build**: 5-10 minutes (first time), 1-2 minutes (cached)
-- **Docker Push**: 2-5 minutes (depends on network)
-- **Benchmark Execution**: 10-20 minutes (depends on dataset size)
-- **Total**: ~20-35 minutes end-to-end
+```bash
+python3 annotate_cl_terms.py \
+  --obo reference_data/cl.obo \
+  --input biologist_predictions.tsv \
+  --name_col cell_type \
+  --output annotated.tsv
+```
 
-### Generated Results
+Uses exact match, synonym match, fuzzy normalization, and LLM-assisted fallback (Claude + OpenAI).
 
-After completion, you'll find:
+**Output:** Original file + added `cell_type_ontology_term_id` column.
 
-- **`benchmark_results.csv`**: Summary metrics per index/metric combination
-- **`*_per_cell_results.csv`**: Detailed predictions for each cell with:
-  - Cell ID, true label, prediction label
-  - Readable labels (human-readable cell type names)
-  - Vote percentage (how many neighbors voted for the prediction)
-  - Euclidean distances (mean and nearest neighbor)
-  - Ontology distances (prediction vs truth, and average across neighbors)
-- **`ontology_analysis/`**: Comprehensive ontology distance analysis
-- **`visualizations/`**: UMAP plots, confusion matrices, distance distributions
+---
 
-### Detailed Instructions
+### Workflows
 
-For complete step-by-step instructions, troubleshooting, and advanced usage, see **[HOW_TO_RUN.md](HOW_TO_RUN.md)**.
+#### Workflow A: Full Benchmark
+```bash
+# Predict
+python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
+  --embeddings test.npy --output preds.tsv
+
+# Evaluate
+python3 evaluate.py --predictions preds.tsv --ground_truth truth.tsv \
+  --obo cl.obo --output-dir eval_results/
+```
+
+#### Workflow B: External Predictions
+```bash
+# Map readable names → CL IDs
+python3 annotate_cl_terms.py --obo cl.obo \
+  --input external_preds.tsv --output annotated.tsv
+
+# Evaluate
+python3 evaluate.py --predictions annotated.tsv --ground_truth truth.tsv \
+  --obo cl.obo --output-dir eval_results/
+```
+
+#### Workflow C: Predict Only (no ground truth)
+```bash
+python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
+  --embeddings unlabeled.npy --output preds.tsv
+```
+
+---
+
+### Documentation
+
+- **[Quick Start Guide](docs/QUICK_START.md)** — Get started quickly with all three programs
+- **[Detailed Usage](docs/USAGE.md)** — All options, examples, troubleshooting
+- **[API Reference](docs/API.md)** — Programmatic usage
+
+---
+
+## Ontology-Aware Metrics
+
+Two methods are available, selectable via `--ontology-method`:
+
+### IC-based Lin Similarity (default, `--ontology-method ic`)
+
+Uses Information Content (IC) to measure semantic similarity between predicted and ground truth cell types.
+
+| Score | Meaning |
+|-------|---------|
+| **1.0** | Identical terms (perfect prediction) |
+| **> 0.8** | Closely related (e.g., neuron subtypes) |
+| **0.4 - 0.7** | Moderately related (e.g., neuron vs. astrocyte) |
+| **~0.0** | Unrelated (e.g., near the ontology root) |
+
+**Higher similarity = better prediction.** A prediction of "Purkinje neuron" when the truth is "cerebellar granule cell" will score higher than a prediction of "erythrocyte", reflecting the biological relatedness of the cell types.
+
+IC values are precomputed using the Zhou (2008) weighted intrinsic IC formula, which blends descendant count with structural depth. Similarity between two terms is computed using Lin (1998): `Sim(A,B) = 2 * IC(MICA) / (IC(A) + IC(B))`, where MICA is the Most Informative Common Ancestor.
+
+### Shortest-Path Distance (`--ontology-method shortest_path`)
+
+Computes the shortest undirected path between two terms in the ontology graph.
+
+**Lower distance = better prediction.** A distance of 0 means an exact match; larger values mean the terms are farther apart in the hierarchy.
+
+Note: on DAGs with multiple inheritance (the Cell Ontology has 33.5% multi-parent terms), shortest undirected path can shortcut across separate branches, potentially underestimating true semantic distance. The IC method is recommended for this reason. See `IC_FORMULA_ANALYSIS.md` for detailed evaluation.
 
 ---
 
@@ -108,510 +138,73 @@ For complete step-by-step instructions, troubleshooting, and advanced usage, see
 
 ```
 FoundationModelBenchmarking/
-├── __init__.py                    # Package initialization
-├── data_loader.py                 # Data ingestion and S3 download
+├── predict.py                     # NEW: Standalone prediction
+├── evaluate.py                    # NEW: Standalone evaluation
+├── annotate_cl_terms.py           # NEW: Standalone annotation
+├── obo_parser.py                  # NEW: OBO file parsing
+│
+├── data_loader.py                 # Data ingestion, S3 download/upload
 ├── prediction_module.py           # KNN search and voting logic
-├── ontology_utils.py              # Cell Ontology processing
-├── evaluation_metrics.py          # Statistical metrics calculation
-├── main_benchmark.py              # Main orchestration script
+├── ontology_utils.py              # Cell Ontology: IC similarity + path distance
+├── analyze_ontology_results.py    # Statistical analysis and reporting
+├── visualization.py               # UMAP plots and confusion matrices
+│
+├── utility/
+│   └── normalize_cell_types.py    # Cell type name normalization
+│
+├── tests/                         # Modern pytest suite
+│   ├── conftest.py
+│   ├── test_obo_parser.py
+│   ├── test_predict.py
+│   ├── test_evaluate.py
+│   └── test_annotate_cl_terms.py
+│
+├── unit-tests/                    # Legacy test suite
+│   ├── test_ontology_utils.py     # 32 tests (IC similarity, path distance, scoring)
+│   ├── test_prediction_module.py  # 10 tests (requires faiss)
+│   └── test_data_loader.py        # 8 tests (requires faiss)
+│
+├── docs/                          # Documentation
+│   ├── QUICK_START.md             # Quick start guide
+│   ├── USAGE.md                   # Detailed usage with examples
+│   └── API.md                     # Programmatic API reference
+│
 ├── requirements.txt               # Python dependencies
-├── verify_setup.py                # Dependency verification script
 ├── Dockerfile                     # Container definition
-├── benchmarking-job.yaml          # Kubernetes job configuration
+├── BUGFIX_NOTES.md                # Documents 6 bug fixes with lessons
+├── IC_FORMULA_ANALYSIS.md         # IC formula comparison and analysis
+├── CHANGELOG.md                   # Commit-level change log
+├── IMPLEMENTATION_SUMMARY.md      # Refactoring summary
 └── README.md                      # This file
 ```
 
-## Architecture
+## Input File Formats
 
-### Module Responsibilities
+| File | Format | Key Details |
+|------|--------|-------------|
+| FAISS index (`*.faiss`) | Binary FAISS index | IVF Flat, IVF PQ, or any FAISS type |
+| Reference annotations (`prediction_obs.tsv`) | TSV | Required: `cell_type_ontology_term_id`. Optional: `cell_type`. Row order must match FAISS index. |
+| Test embeddings (`{dataset_id}_*.npy`) | NumPy binary | Shape: `(n_cells, embedding_dim)`, float32/64. Matched to metadata by shared `{dataset_id}` prefix. |
+| Test metadata (`{dataset_id}_prediction_obs.tsv`) | TSV | Required: `cell_type_ontology_term_id`. Optional: `cell_type`, `cell_id`. The `{dataset_id}` is everything before `_prediction_obs.tsv`. |
+| Cell Ontology (`cl.obo`) | OBO | Source: [OBO Foundry](http://obofoundry.org/ontology/cl.html) |
 
-| Module | Core Responsibility | Key Dependencies |
-|--------|---------------------|------------------|
-| `data_loader.py` | IO operations for FAISS indices, TSV annotations, and NumPy embeddings. Handles S3 data downloads. | faiss, numpy, pandas, boto3, os |
-| `prediction_module.py` | KNN search execution with metric switching (Euclidean/Cosine). Implements majority voting for cell type prediction. | numpy, collections, faiss |
-| `ontology_utils.py` | OBO file parsing, DAG construction, and graph distance calculations using Lowest Common Ancestor (LCA). | pronto, networkx |
-| `evaluation_metrics.py` | Statistical calculations: Accuracy, F1 (Macro & Weighted), Top-k Accuracy | sklearn.metrics |
-| `main_benchmark.py` | Orchestrates benchmarking loops across Index Type × Metric × Dataset permutations | All of the above |
-
-## How It Works
-
-### 1. Data Ingestion (Phase 1)
-
-#### Reference Data
-- **FAISS Index**: Pre-computed graph structure for reference cells (e.g., `index_ivfflat.faiss`)
-- **Annotations**: `prediction_obs.tsv` containing `cell_type_ontology_term_id` and `cell_type` columns
-  - **Critical**: Must align perfectly with FAISS index row order
-
-#### Test Data
-Located in `test_data/` directory with paired files:
-- **Embeddings**: `{dataset_id}_{embedding}.npy` (NumPy binary array)
-- **Metadata**: `{dataset_id}_prediction_obs.tsv` (ground truth labels)
-
-The `load_test_batch()` function automatically discovers and pairs these files.
-
-#### S3 Data Source
-Data can be automatically downloaded from:
-```
-s3://latentbrain/combined_UCE_5neuro/
-```
-
-### 2. Prediction Pipeline (Phase 2)
-
-#### KNN Search
-```python
-execute_query(index, query_embeddings, k=30, metric='euclidean')
-```
-- Queries FAISS index for top k nearest neighbors
-- Supports metric switching:
-  - `'euclidean'`: L2 distance
-  - `'cosine'`: Cosine similarity (vectors are normalized)
-
-#### Majority Voting
-```python
-vote_neighbors(neighbor_indices, reference_annotations)
-```
-- Maps neighbor indices → reference annotation rows → cell type ontology term IDs
-- Performs majority voting to determine final prediction
-- Returns most common cell type among k neighbors
-
-### 3. Evaluation (Phase 3)
-
-#### Standard Metrics
-- **Overall Accuracy**: Exact match between prediction and ground truth
-- **Top-k Accuracy**: Ground truth appears in k neighbors
-- **F1 Score**: Macro and weighted averages across cell types
-
-#### Ontology-Aware Metrics
-Uses Cell Ontology (CL) graph structure to calculate biological distance:
-
-```python
-calculate_graph_distance(graph, predicted_id, truth_id)
-```
-
-**Distance Calculation**:
-1. Find Lowest Common Ancestor (LCA) of predicted and truth nodes
-2. Calculate: `distance = path_length(predicted → LCA) + path_length(truth → LCA)`
-3. Returns edge count (0 = exact match, higher = more distant)
-
-**Batch Scoring**:
-- Mean ontology distance
-- Median ontology distance
-
-This accounts for cases where predictions are "close" in the ontology hierarchy even if not exact matches.
-
-### 4. Benchmarking Orchestration
-
-The `run_benchmark()` function orchestrates nested loops:
-
-```python
-for index_type in ['ivfFlat', 'ivfPQ']:
-    for metric in ['euclidean', 'cosine']:
-        for dataset in test_datasets:
-            # Execute query
-            # Calculate metrics
-            # Record results
-```
-
-Results are saved to `benchmark_results.csv` with columns:
-- Index, Metric, Dataset
-- accuracy, f1_macro, f1_weighted, top_k_accuracy
-- mean_ontology_dist, median_ontology_dist
-- Avg_Query_Time_ms
-
-## Installation
-
-### Recommended: Kubernetes Deployment (Production)
-
-**See [Quick Start](#quick-start) section above for complete instructions.**
-
-The benchmark is designed to run as a Kubernetes job with:
-- Data volume (PVC) mounted at `/data` for persistent storage
-- AWS credentials for S3 access (via Kubernetes secrets or mounted credentials)
-- Automatic data download from S3 if needed
-
-### Local Development Setup
-
-For local development or testing:
-
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd FoundationModelBenchmarking
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   Required packages:
-   - faiss-cpu==1.7.4
-   - numpy<2.0
-   - pandas
-   - scikit-learn
-   - pronto
-   - networkx
-   - boto3
-   - matplotlib
-   - seaborn
-   - umap-learn
-
-3. **Verify installation**:
-   ```bash
-   python3 verify_setup.py
-   ```
-
-4. **Run locally** (requires data files):
-   ```bash
-   python3 -m main_benchmark \
-       --test_dir test_data/ \
-       --ref_annot reference_data/prediction_obs.tsv \
-       --obo reference_data/cl.obo
-   ```
-
-### Docker Setup (Alternative)
-
-Build and run locally with Docker:
-```bash
-# Build
-docker build -t uce-benchmark:v1 .
-
-# Run (mount data directory)
-docker run -v /path/to/data:/data uce-benchmark:v1
-```
-
-**Note**: For production use, we recommend Kubernetes deployment (see Quick Start above).
-
-## Usage
-
-### Basic Usage
+## Local Development
 
 ```bash
-python3 -m main_benchmark \
-    --test_dir test_data/ \
-    --ref_annot reference_data/prediction_obs.tsv \
-    --obo reference_data/cl.obo
+git clone <repository-url>
+cd FoundationModelBenchmarking
+pip install -r requirements.txt    # or: conda install -c conda-forge faiss-cpu
+
+# Run new programs
+python3 predict.py --help
+python3 evaluate.py --help
+python3 annotate_cl_terms.py --help
+
+# Run tests
+pip install pytest pytest-cov
+pytest tests/ -v
+pytest unit-tests/ -v  # Legacy test suite
 ```
-
-### With S3 Download
-
-```bash
-python3 -m main_benchmark \
-    --test_dir test_data/ \
-    --ref_annot reference_data/prediction_obs.tsv \
-    --obo reference_data/cl.obo \
-    --s3_bucket latentbrain \
-    --s3_prefix combined_UCE_5neuro/
-```
-
-### Skip S3 Download
-
-```bash
-python3 -m main_benchmark --no-s3
-```
-
-### Configure AWS Profile
-
-Set environment variable or configure in `~/.aws/config`:
-```bash
-export AWS_PROFILE=braingeneers
-```
-
-## Configuration
-
-### Kubernetes Job Configuration
-
-Before deploying, check/update `benchmarking-job.yaml`:
-
-1. **Image name**: Update if using different Docker registry:
-   ```yaml
-   image: suhaso123/uce-benchmark:v1  # Change to your image
-   ```
-
-2. **Namespace**: Default is `braingeneers`, update if needed:
-   ```yaml
-   namespace: braingeneers
-   ```
-
-3. **PVC name**: Ensure PVC exists or update name:
-   ```yaml
-   persistentVolumeClaim:
-     claimName: benchmark-data-pvc  # Must exist in namespace
-   ```
-
-4. **AWS credentials**: Configure via Kubernetes secrets or environment variables:
-   ```yaml
-   env:
-     - name: AWS_ACCESS_KEY_ID
-       valueFrom:
-         secretKeyRef:
-           name: aws-credentials
-           key: access-key-id
-   ```
-
-### Index Configuration
-
-The benchmark automatically discovers FAISS indices in `/data/indices/` directory. Expected files:
-- `index_ivfflat.faiss` (or similar naming)
-
-To use different indices, edit `main_benchmark.py` or provide via command-line:
-```bash
---indices_config indices/config.txt
-```
-
-### Default Paths (in container)
-
-When running in Kubernetes, data paths are:
-- `/data/indices/` - FAISS index files
-- `/data/reference_data/` - Reference annotations and ontology files
-- `/data/test_data/` - Test datasets (or downloaded from S3)
-- `/data/per_cell_results/` - Per-cell prediction results (output)
-- `/data/visualizations/` - Generated plots (output)
-- `/data/ontology_analysis/` - Ontology analysis reports (output)
-
-## Expected Input File Formats
-
-### FAISS Index
-- Format: Binary FAISS index file
-- Types supported: IVF Flat, IVF PQ, or any FAISS index type
-- File extension: `.faiss`
-
-### Reference Annotations (`prediction_obs.tsv`)
-- Format: Tab-separated values (TSV)
-- Required columns:
-  - `cell_type_ontology_term_id`: CL term ID (e.g., "CL:0000000")
-  - `cell_type`: Human-readable cell type name
-- **Critical**: Row order must exactly match FAISS index order
-
-### Test Embeddings (`{dataset_id}_{embedding}.npy`)
-- Format: NumPy binary array (`.npy`)
-- Shape: `(n_cells, embedding_dim)`
-- Data type: float32 or float64
-
-### Test Metadata (`{dataset_id}_prediction_obs.tsv`)
-- Format: Tab-separated values (TSV)
-- Required columns:
-  - `cell_type_ontology_term_id`: Ground truth CL term ID
-  - `cell_type`: Human-readable cell type name
-
-### Cell Ontology (`cl.obo`)
-- Format: OBO ontology file
-- Source: [Cell Ontology](http://obofoundry.org/ontology/cl.html)
-
-## Output
-
-### Results CSV
-`benchmark_results.csv` contains:
-
-| Column | Description |
-|--------|-------------|
-| Index | Index type used (e.g., "ivfFlat") |
-| Metric | Distance metric (e.g., "euclidean") |
-| Dataset | Test dataset ID |
-| accuracy | Overall prediction accuracy (0-1) |
-| f1_macro | Macro-averaged F1 score |
-| f1_weighted | Weighted F1 score |
-| top_k_accuracy | Proportion where truth in top-k neighbors |
-| mean_ontology_dist | Mean graph distance in CL ontology |
-| median_ontology_dist | Median graph distance in CL ontology |
-| Avg_Query_Time_ms | Average query time per cell (milliseconds) |
-
-## Implementation Status
-
-### Completed Features ✅
-
-**Phase 1: Infrastructure & Data Ingestion**
-- ✅ `load_faiss_index()` - Loads different FAISS index types
-- ✅ `load_reference_annotations()` - Validates required columns
-- ✅ `load_test_batch()` - Auto-discovers test dataset pairs
-- ✅ `download_data_from_s3()` - Downloads data from S3
-
-**Phase 2: Benchmarking Logic**
-- ✅ `execute_query()` - KNN search with metric switching
-- ✅ `vote_neighbors()` - Majority voting implementation
-- ✅ `run_benchmark()` - Orchestrates all permutations
-
-**Phase 3: Evaluation & Ontology**
-- ✅ `calculate_accuracy()` - Standard metrics (Accuracy, F1, Top-k)
-- ✅ `load_ontology()` - OBO file parsing to NetworkX DAG
-- ✅ `calculate_graph_distance()` - LCA-based distance calculation
-- ✅ `score_batch()` - Mean/median ontology distance
-
-**Infrastructure**
-- ✅ Docker containerization
-- ✅ Kubernetes job configuration
-- ✅ AWS S3 integration
-
-### Known Gaps ⚠️
-
-#### High Priority
-
-1. **Phase 4: Visualization & Reporting** ❌
-   - Missing UMAP plots colored by:
-     - Ground Truth
-     - Prediction
-     - Ontology Error Magnitude
-   - Missing confusion matrices
-   - Missing comprehensive summary table (beyond CSV)
-
-2. **Data Validation**
-   - `load_reference_annotations()` doesn't verify row count alignment with FAISS index
-   - No explicit validation that positive control file exists in test batch
-   - Missing file format validation
-
-3. **Package Structure Issue**
-   - `main_benchmark.py` uses relative imports (e.g., `from .data_loader`)
-   - Fails when run directly as a script
-   - Should be run as module: `python3 -m main_benchmark`
-   - Or refactor to absolute imports
-
-#### Medium Priority
-
-4. **Index Configuration**
-   - Hardcoded index paths in `main_benchmark.py`
-   - `--indices_config` argument exists but not fully implemented
-   - Only ivfFlat configured by default, ivfPQ commented out
-
-5. **Foundation Model Comparison**
-   - No explicit support for comparing UCE vs SCimilarity
-   - Currently assumes different embeddings come as different test datasets
-   - Could benefit from explicit model tracking/labeling
-
-6. **Error Handling**
-   - Limited error handling for malformed data files
-   - No graceful degradation if ontology file missing
-   - Silent failures in some edge cases
-
-#### Low Priority
-
-7. **Testing**
-   - No unit tests
-   - No integration tests
-   - No example/mock data for testing
-
-8. **Performance Optimization**
-   - No batch processing optimization
-   - Could parallelize dataset processing
-   - No caching of ontology graph computations
-
-9. **Logging**
-   - Basic print statements instead of proper logging framework
-   - No log levels (DEBUG, INFO, WARNING, ERROR)
-   - Difficult to troubleshoot in production
-
-10. **Documentation**
-    - Limited inline code documentation
-    - No examples of expected data formats
-    - No troubleshooting guide
-
-## Recommended Next Steps
-
-### Critical Fixes
-1. **Fix package structure** - Refactor imports or add `setup.py` for proper package installation
-2. **Add data validation** - Verify FAISS index and annotation alignment before processing
-3. **Implement visualizations** - UMAP plots and confusion matrices as specified in plan
-
-### Enhancements
-4. **Add unit tests** - Test each module independently
-5. **Improve error handling** - Better error messages and recovery
-6. **Add logging framework** - Replace print statements with proper logging
-7. **Create example data** - Small test dataset for validation
-
-### Nice to Have
-8. **Parallelization** - Speed up multi-dataset benchmarking
-9. **Web dashboard** - Interactive visualization of results
-10. **Automated reporting** - Generate PDF reports with plots and tables
-
-## Troubleshooting
-
-### Import Errors
-
-**Problem**: `ModuleNotFoundError` when running `main_benchmark.py`
-
-**Solution**: Run as a module:
-```bash
-python3 -m main_benchmark
-```
-
-Or add current directory to PYTHONPATH:
-```bash
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-python3 main_benchmark.py
-```
-
-### S3 Access Issues
-
-**Problem**: `NoCredentialsError` or access denied
-
-**Solutions**:
-- Configure AWS credentials: `aws configure --profile braingeneers`
-- Check IAM permissions for S3 bucket access
-- Use `--no-s3` flag to skip S3 download
-
-### Missing Dependencies
-
-**Problem**: Import errors for `pronto` or `networkx`
-
-**Solution**:
-```bash
-pip install -r requirements.txt
-```
-
-Verify with:
-```bash
-python3 verify_setup.py
-```
-
-### FAISS Index Mismatch
-
-**Problem**: `IndexError: Neighbor index out of bounds`
-
-**Cause**: Reference annotation file doesn't match FAISS index size
-
-**Solution**: Ensure `prediction_obs.tsv` has exactly the same number of rows as vectors in FAISS index
-
-### Ontology Distance Returns -1
-
-**Problem**: `mean_ontology_dist` shows -1 or very large negative values
-
-**Causes**:
-- Cell type ID not found in ontology graph
-- Disconnected components in ontology (no common ancestor)
-- Malformed CL term IDs
-
-**Solution**: Check that CL term IDs in data match format in `cl.obo` file (e.g., "CL:0000001")
-
-## Performance Considerations
-
-### Query Time
-- IVF indices require training but offer faster search
-- Euclidean distance is slightly faster than cosine
-- Query time scales with k (number of neighbors)
-
-### Memory Usage
-- FAISS indices are memory-mapped (efficient)
-- Ontology graph loaded once and reused
-- Large test datasets processed sequentially to limit memory
-
-### Optimization Tips
-- Use IVF PQ for memory-constrained environments
-- Reduce k if speed is critical (typical range: 10-50)
-- Process large batches with `faiss.IndexShards` for parallelization
-
-## Citation
-
-If you use this benchmarking framework, please cite:
-```
-[Citation information to be added]
-```
-
-## License
-
-[License information to be added]
-
-## Contact
-
-For questions or issues, please open an issue on GitHub or contact [contact information].
 
 ## References
 
@@ -619,3 +212,5 @@ For questions or issues, please open an issue on GitHub or contact [contact info
 - [Cell Ontology](http://obofoundry.org/ontology/cl.html)
 - [Universal Cell Embeddings](https://www.biorxiv.org/content/10.1101/2023.11.28.568918v1)
 - [CELLxGENE](https://cellxgene.cziscience.com/)
+- Lin, D. (1998). An Information-Theoretic Definition of Similarity. In *Proceedings of the 15th International Conference on Machine Learning (ICML 1998)*, Vol. 98, pp. 296-304.
+- Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content for Semantic Similarity in WordNet. In *2008 Second International Conference on Future Generation Communication and Networking Symposia*, Hainan, China, pp. 85-89. doi: 10.1109/FGCNS.2008.16.

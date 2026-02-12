@@ -1,0 +1,95 @@
+Ontology: 3238 non-obsolete terms
+Precomputing descendants, depths, leaves...
+  Max depth: 12
+  Total leaf nodes: 2049
+  Max leaves under any node: 2039
+
+==============================================================================================================
+Cell Type                                Depth  Desc Leaves |   Seco   Zhou Sanchez  Depth
+==============================================================================================================
+cell                                         0  3228   2039 |  0.000  0.000   7.131  0.000
+neuron                                       3   746    510 |  0.181  0.361   7.100  0.250
+GABAergic neuron                             2   159    104 |  0.372  0.400   7.117  0.167
+glutamatergic neuron                         2    98     64 |  0.431  0.430   7.118  0.167
+astrocyte                                    6    59     41 |  0.493  0.626   7.093  0.500
+oligodendrocyte                              6    28     19 |  0.583  0.671   7.103  0.500
+microglial cell                              4     4      3 |  0.801  0.714   7.061  0.333
+interneuron                                  5   167    116 |  0.366  0.532   7.093  0.417
+Purkinje cell                                3     4      2 |  0.801  0.671   7.215  0.250
+glial cell                                   4   154    101 |  0.376  0.502   7.116  0.333
+macroglial cell                              5    89     60 |  0.443  0.571   7.105  0.417
+astrocyte of the cerebral cortex             6     6      4 |  0.759  0.759   7.110  0.500
+secretory cell                               1   614    388 |  0.206  0.238   7.131  0.083
+
+==============================================================================================================
+LIN SIMILARITY using Seco IC
+==============================================================================================================
+Cell A                    Cell B                       Sim | MICA                            IC_A  IC_B IC_MICA
+--------------------------------------------------------------------------------------------------------------
+GABAergic neuron          glutamatergic neuron       0.511 | secretory cell                 0.372 0.431   0.206
+neuron                    GABAergic neuron           0.656 | neuron                         0.181 0.372   0.181
+GABAergic neuron          Purkinje cell              0.634 | GABAergic neuron               0.372 0.801   0.372
+astrocyte                 oligodendrocyte            0.823 | macroglial cell                0.493 0.583   0.443
+astrocyte                 microglial cell            0.581 | glial cell                     0.493 0.801   0.376
+neuron                    astrocyte                  0.433 | neural cell                    0.181 0.493   0.146
+neuron                    microglial cell            0.298 | neural cell                    0.181 0.801   0.146
+astrocyte of the cerebral cortex astrocyte                  0.788 | astrocyte                      0.759 0.493   0.493
+glutamatergic neuron      Purkinje cell              0.334 | secretory cell                 0.431 0.801   0.206
+
+==============================================================================================================
+LIN SIMILARITY using Zhou(k=0.5) IC
+==============================================================================================================
+Cell A                    Cell B                       Sim | MICA                            IC_A  IC_B IC_MICA
+--------------------------------------------------------------------------------------------------------------
+GABAergic neuron          glutamatergic neuron       0.870 | neuron                         0.400 0.430   0.361
+neuron                    GABAergic neuron           0.948 | neuron                         0.361 0.400   0.361
+GABAergic neuron          Purkinje cell              0.747 | GABAergic neuron               0.400 0.671   0.400
+astrocyte                 oligodendrocyte            0.880 | macroglial cell                0.626 0.671   0.571
+astrocyte                 microglial cell            0.749 | glial cell                     0.626 0.714   0.502
+neuron                    astrocyte                  0.582 | neural cell                    0.361 0.626   0.287
+neuron                    microglial cell            0.534 | neural cell                    0.361 0.714   0.287
+astrocyte of the cerebral cortex astrocyte                  0.904 | astrocyte                      0.759 0.626   0.626
+glutamatergic neuron      Purkinje cell              0.656 | neuron                         0.430 0.671   0.361
+
+==============================================================================================================
+LIN SIMILARITY using Sanchez IC
+==============================================================================================================
+Cell A                    Cell B                       Sim | MICA                            IC_A  IC_B IC_MICA
+--------------------------------------------------------------------------------------------------------------
+GABAergic neuron          glutamatergic neuron       1.002 | cell                           7.117 7.118   7.131
+neuron                    GABAergic neuron           1.003 | cell                           7.100 7.117   7.131
+GABAergic neuron          Purkinje cell              0.995 | cell                           7.117 7.215   7.131
+astrocyte                 oligodendrocyte            1.005 | cell                           7.093 7.103   7.131
+astrocyte                 microglial cell            1.008 | cell                           7.093 7.061   7.131
+neuron                    astrocyte                  1.005 | cell                           7.100 7.093   7.131
+neuron                    microglial cell            1.007 | cell                           7.100 7.061   7.131
+astrocyte of the cerebral cortex astrocyte                  1.004 | cell                           7.110 7.093   7.131
+glutamatergic neuron      Purkinje cell              0.995 | cell                           7.118 7.215   7.131
+
+==============================================================================================================
+LIN SIMILARITY using Depth-only IC
+==============================================================================================================
+Cell A                    Cell B                       Sim | MICA                            IC_A  IC_B IC_MICA
+--------------------------------------------------------------------------------------------------------------
+GABAergic neuron          glutamatergic neuron       1.500 | neuron                         0.167 0.167   0.250
+neuron                    GABAergic neuron           1.200 | neuron                         0.250 0.167   0.250
+GABAergic neuron          Purkinje cell              1.200 | neuron                         0.167 0.250   0.250
+astrocyte                 oligodendrocyte            0.833 | macroglial cell                0.500 0.500   0.417
+astrocyte                 microglial cell            0.800 | glial cell                     0.500 0.333   0.333
+neuron                    astrocyte                  0.444 | neural cell                    0.250 0.500   0.167
+neuron                    microglial cell            0.571 | neural cell                    0.250 0.333   0.167
+astrocyte of the cerebral cortex astrocyte                  1.000 | astrocyte                      0.500 0.500   0.500
+glutamatergic neuron      Purkinje cell              1.200 | neuron                         0.167 0.250   0.250
+
+==============================================================================================================
+PREVIOUSLY PROBLEMATIC CASES (shortest path != LCA distance)
+==============================================================================================================
+
+multinucleated phagocyte  vs  CD103-positive dendritic cell
+  IC values:
+  Seco           : IC_A=0.828, IC_B=0.801, MICA=phagocyte (sensu Vertebrata) (IC=0.350), Lin=0.430
+  Zhou(k=0.5)    : IC_A=0.684, IC_B=0.714, MICA=phagocyte (sensu Vertebrata) (IC=0.389), Lin=0.557
+  Sanchez        : IC_A=7.333, IC_B=7.061, MICA=phagocyte (sensu Vertebrata) (IC=7.151), Lin=0.994
+  Depth-only     : IC_A=0.250, IC_B=0.333, MICA=phagocyte (sensu Vertebrata) (IC=0.167), Lin=0.571
+
+Done.

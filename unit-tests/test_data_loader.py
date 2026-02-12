@@ -77,7 +77,6 @@ class TestLoadReferenceAnnotations(unittest.TestCase):
         self.assertIsInstance(df, pd.DataFrame)
         self.assertEqual(len(df), 100)
         self.assertIn('cell_type_ontology_term_id', df.columns)
-        self.assertIn('cell_type', df.columns)
 
     def test_file_not_found(self):
         """Test that FileNotFoundError is raised for missing file."""

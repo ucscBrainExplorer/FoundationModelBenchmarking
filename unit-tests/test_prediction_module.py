@@ -50,22 +50,16 @@ class TestExecuteQuery(unittest.TestCase):
         self.assertTrue(np.all(dists >= 0))
 
     def test_execute_query_cosine(self):
-        """Test query execution with cosine metric."""
+        """Test that cosine metric raises ValueError with L2 index."""
         k = 5
-        dists, indices = execute_query(
-            self.index,
-            self.query_embeddings,
-            k=k,
-            metric='cosine'
-        )
-
-        # Check output shapes
-        self.assertEqual(dists.shape, (10, k))
-        self.assertEqual(indices.shape, (10, k))
-
-        # Check that indices are valid
-        self.assertTrue(np.all(indices >= 0))
-        self.assertTrue(np.all(indices < self.index.ntotal))
+        with self.assertRaises(ValueError) as context:
+            execute_query(
+                self.index,
+                self.query_embeddings,
+                k=k,
+                metric='cosine'
+            )
+        self.assertIn("Cosine metric is not supported", str(context.exception))
 
     def test_default_k_value(self):
         """Test that default k=30 works correctly."""
@@ -281,8 +275,8 @@ class TestVoteNeighbors(unittest.TestCase):
         self.assertEqual(len(predictions), 1)
         self.assertEqual(len(vote_percentages), 1)
         self.assertEqual(predictions[0], '')
-        # Vote percentage should be 0.0 when all labels missing
-        self.assertEqual(vote_percentages[0], 0.0)
+        # Vote percentage should be NaN when all labels missing
+        self.assertTrue(np.isnan(vote_percentages[0]))
 
 
 if __name__ == '__main__':
