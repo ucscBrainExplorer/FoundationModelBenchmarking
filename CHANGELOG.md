@@ -2,6 +2,135 @@
 
 ---
 
+## 2026-02-12 — Split benchmarking into three standalone composable programs
+
+**Branch:** `review/student-code-fixes`
+
+### Summary
+
+Major refactoring that splits the monolithic `main_benchmark.py` into three standalone, composable programs: `predict.py` (prediction without ground truth), `evaluate.py` (evaluation with ontology metrics), and `annotate_cl_terms.py` (readable names → CL IDs with LLM fallback). Enables flexible workflows including evaluating external predictions and predicting on unlabeled data. `main_benchmark.py` preserved for backwards compatibility.
+
+### New Programs
+
+#### `predict.py` — Standalone prediction
+- Predict cell types using FAISS k-NN + majority voting
+- **No ground truth required** — works on unlabeled data
+- Outputs TSV with: predicted CL term IDs, readable names, vote confidence, mean euclidean distance, neighbor distances, neighbor cell types
+- Reuses: `data_loader`, `prediction_module`, `obo_parser`
+
+#### `evaluate.py` — Standalone evaluation
+- Evaluate predictions using ontology-based semantic metrics (IC similarity or shortest-path distance)
+- **Accepts any predictions** — not just from `predict.py`
+- Configurable column names via `--pred_id_col`, `--truth_id_col` for external prediction formats
+- Outputs: `evaluation_summary.tsv`, `per_cell_evaluation.tsv`, `ontology_analysis_report.txt`, `ontology_distance_analysis.png`
+- Reuses: `ontology_utils`, `analyze_ontology_results`, `obo_parser`
+- Reports exact CL term match rate as supplementary statistic
+
+#### `annotate_cl_terms.py` — Standalone annotation
+- Map readable cell type names → CL ontology term IDs
+- Multi-step matching: exact match → synonym match → fuzzy normalization → LLM-assisted fallback
+- LLM consensus: queries both Claude and OpenAI APIs, auto-accepts if both agree, interactive prompt if they disagree
+- Fuzzy normalization: strips hyphens/underscores/plurals (e.g., "T-cells" → "T cell", "oligodendrocytes" → "oligodendrocyte")
+- Outputs original TSV + added `cell_type_ontology_term_id` column
+- Requires `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` for LLM fallback
+
+### New Module
+
+#### `obo_parser.py` — OBO parsing
+- Extracted `parse_obo_names()` from `utility/normalize_cell_types.py` to eliminate code duplication
+- Single source of truth for OBO file parsing
+- Now imported by: `predict.py`, `evaluate.py`, `annotate_cl_terms.py`, `utility/normalize_cell_types.py`
+
+### Modified Files
+
+#### `utility/normalize_cell_types.py`
+- Removed local `parse_obo_names()` definition
+- Now imports from `obo_parser` module
+
+#### `README.md` — Complete rewrite
+- Three standalone programs prominently featured at top
+- Three workflow examples (A: full benchmark, B: external predictions, C: predict only)
+- Moved `main_benchmark.py` to "Legacy" section (still documented for Kubernetes + local)
+- Updated project structure showing new files
+- Fixed misleading statement: `evaluate.py` uses ontology metrics only; `main_benchmark.py` computes accuracy/F1
+- Links to new `docs/` folder
+
+#### `HOW_TO_RUN.md` — Removed
+- Content consolidated into README and `docs/` folder
+
+### New Documentation (`docs/`)
+
+#### `docs/QUICK_START.md`
+- Quick start guide for all three programs
+- Three workflow examples with copy-paste commands
+- Ontology metrics explanation (IC similarity vs. shortest-path distance)
+- Common arguments tables
+
+#### `docs/USAGE.md`
+- Detailed usage for each program with multiple examples
+- File format specifications
+- Troubleshooting section (common errors and solutions)
+- Output file descriptions
+
+#### `docs/API.md`
+- Full programmatic API reference for all modules
+- Function signatures, args, returns, raises
+- Complete example workflow at end
+
+### New Tests (`tests/`)
+
+Modern pytest-based test suite:
+- `tests/conftest.py` — Shared fixtures (temp dirs, sample OBO, embeddings, annotations, predictions, ground truth)
+- `tests/test_obo_parser.py` — OBO parsing tests
+- `tests/test_predict.py` — Argument parsing and output format tests
+- `tests/test_evaluate.py` — Argument parsing and workflow tests
+- `tests/test_annotate_cl_terms.py` — Matching logic tests (exact, synonym, fuzzy, LLM)
+- `tests/README.md` — Test suite documentation
+
+Legacy `unit-tests/` directory preserved unchanged.
+
+### Documentation Files
+
+- `IMPLEMENTATION_SUMMARY.md` — Complete overview of refactoring decisions and design
+- `VERIFICATION_CHECKLIST.md` — Testing and validation checklist
+
+### Files Removed
+
+- `analyze_per_cell_results.py` — Functionality now in `analyze_ontology_results.py` (not imported anywhere)
+- `ic_formula_comparison.py` — Standalone research script (not imported anywhere)
+- `verify_setup.py` — Development script (not imported anywhere)
+- `HOW_TO_RUN.md` — Content consolidated into README and `docs/`
+- `docs/README_UPDATE.md` — Source content for README update (no longer needed)
+
+### Key Design Decisions
+
+1. **Composability** — Each program has single responsibility, can be used independently or chained
+2. **Backwards compatibility** — `main_benchmark.py` unchanged, all existing modules unchanged
+3. **Column name flexibility** — `evaluate.py` accepts custom column names for external predictions
+4. **Ontology-first evaluation** — Exact match is supplementary; primary metrics are semantic similarity
+5. **LLM-assisted annotation** — Dual API (Claude + OpenAI) for robustness with consensus-based auto-accept
+
+### Workflows Enabled
+
+**Workflow A: Full benchmark (predict + evaluate)**
+```bash
+python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo --embeddings test.npy --output preds.tsv
+python3 evaluate.py --predictions preds.tsv --ground_truth truth.tsv --obo cl.obo --output eval_results/
+```
+
+**Workflow B: External predictions (map names → evaluate)**
+```bash
+python3 annotate_cl_terms.py --obo cl.obo --input external_preds.tsv --output annotated.tsv
+python3 evaluate.py --predictions annotated.tsv --ground_truth truth.tsv --obo cl.obo --output eval_results/
+```
+
+**Workflow C: Predict only (no ground truth)**
+```bash
+python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo --embeddings unlabeled.npy --output preds.tsv
+```
+
+---
+
 ## 2026-02-10 — Simplify S3/local workflow, clean up CLI args and docs
 
 **Commit:** `0cc8922` on branch `review/student-code-fixes`

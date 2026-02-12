@@ -1,6 +1,37 @@
 import os
 import sys
 import argparse
+
+
+def build_parser():
+    """Build the CLI argument parser (lightweight, no heavy imports)."""
+    parser = argparse.ArgumentParser(description="Run Benchmarking")
+    parser.add_argument("--index", type=str, required=True,
+                        help="Path to FAISS index file (e.g. indices/index_ivfflat.faiss)")
+    parser.add_argument("--test_dir", type=str, required=True,
+                        help="Directory containing test datasets (e.g. test_data)")
+    parser.add_argument("--ref_annot", type=str, required=True,
+                        help="Path to reference annotation TSV (e.g. reference_data/prediction_obs.tsv)")
+    parser.add_argument("--ref_ontology", type=str, required=True,
+                        help="Path to OBO ontology file (e.g. reference_data/cl.obo)")
+    parser.add_argument("--ontology-method", type=str, required=True, choices=["ic", "shortest_path"],
+                        help="Ontology scoring method: 'ic' for Lin similarity with Zhou IC, "
+                             "'shortest_path' for shortest undirected path distance")
+    parser.add_argument("--s3", action="store_true", help="Download data from / upload results to S3")
+    parser.add_argument("--s3_bucket", type=str, default=None,
+                        help="S3 bucket name (required with --s3)")
+    parser.add_argument("--s3_prefix", type=str, default=None,
+                        help="S3 key prefix, e.g. 'combined_UCE_5neuro/' (required with --s3)")
+    parser.add_argument("--generate-plots", action="store_true", help="Generate UMAP plots and confusion matrices")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory for visualization outputs (default: visualizations/)")
+    return parser
+
+
+# Fast exit: show help immediately without loading heavy dependencies
+if __name__ == "__main__" and len(sys.argv) == 1:
+    build_parser().print_help()
+    sys.exit(0)
+
 import logging
 import pandas as pd
 import numpy as np
@@ -19,13 +50,11 @@ except ImportError:
     print("Warning: Visualization dependencies not available. Install with: pip install matplotlib seaborn umap-learn")
 
 # Default Configuration
-# Create timestamped results in a temp directory first;
-# after the run, results are uploaded to S3 (cluster) or moved locally (--no-s3).
 import tempfile
 import shutil
 from datetime import datetime
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
-RESULTS_DIR = os.path.join(tempfile.gettempdir(), "benchmark_results", TIMESTAMP)
+RESULTS_DIR = os.path.join("benchmark_results", TIMESTAMP)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # Configure file logging (writes into the temp results directory)
@@ -37,10 +66,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_TEST_DIR = "test_data"
-DEFAULT_INDEX = "indices/index_ivfflat.faiss"
-DEFAULT_REF_ANNOTATION = "reference_data/prediction_obs.tsv"
-DEFAULT_OBO_PATH = "reference_data/cl.obo"
 
 def run_benchmark(
     index_paths: Dict[str, str],
@@ -62,13 +87,12 @@ def run_benchmark(
     # Validate S3 arguments
     if download_s3 and (not s3_bucket or not s3_prefix):
         raise ValueError(
-            "--s3_bucket and --s3_prefix are required for S3. "
-            "Use --no-s3 to run without S3."
+            "--s3_bucket and --s3_prefix are required when using --s3."
         )
 
     # 0. S3 Download (Optional)
     # Downloads from s3://{bucket}/{prefix}/ and places files at the paths
-    # specified by the CLI arguments (--index, --ref_annot, --obo, --test_dir).
+    # specified by the CLI arguments (--index, --ref_annot, --ref_ontology, --test_dir).
     if download_s3:
         index_path = list(index_paths.values())[0]
 
@@ -300,18 +324,20 @@ def run_benchmark(
                     # Calculate Ontology Metrics
                     per_cell_distances = None
                     avg_neighbor_distances = None
+                    # Determine method-aware column name suffixes
+                    if ontology_method == 'ic':
+                        _onto_col = 'ontology_IC_similarity'
+                        _avg_nb_col = 'avg_neighbor_ontology_IC_similarity'
+                    else:
+                        _onto_col = 'ontology_shortestpath_distance'
+                        _avg_nb_col = 'avg_neighbor_ontology_shortestpath_distance'
+
                     if ontology_graph:
                         mean_score, median_score = score_batch(
                             ontology_graph, predictions, truth_labels,
                             method=ontology_method, ic_values=ic_values)
-                        if ontology_method == 'ic':
-                            metrics_scores['mean_ontology_similarity'] = mean_score
-                            metrics_scores['median_ontology_similarity'] = median_score
-                        elif ontology_method == 'shortest_path':
-                            metrics_scores['mean_ontology_dist'] = mean_score
-                            metrics_scores['median_ontology_dist'] = median_score
-                        else:
-                            print(f"    ERROR: Unknown ontology method '{ontology_method}'. Only 'ic' and 'shortest_path' are supported.")
+                        metrics_scores[f'mean_{_onto_col}'] = mean_score
+                        metrics_scores[f'median_{_onto_col}'] = median_score
                         # Calculate per-cell scores for detailed output
                         per_cell_distances = calculate_per_cell_distances(
                             ontology_graph, predictions, truth_labels,
@@ -323,13 +349,13 @@ def run_benchmark(
                         # Add aggregate statistic for average neighbor distances
                         valid_avg_neighbor_dists = [d for d in avg_neighbor_distances if pd.notna(d)]
                         if len(valid_avg_neighbor_dists) > 0:
-                            metrics_scores['mean_avg_neighbor_ontology_dist'] = float(np.mean(valid_avg_neighbor_dists))
+                            metrics_scores[f'mean_{_avg_nb_col}'] = float(np.mean(valid_avg_neighbor_dists))
                         else:
-                            metrics_scores['mean_avg_neighbor_ontology_dist'] = np.nan
+                            metrics_scores[f'mean_{_avg_nb_col}'] = np.nan
                     else:
-                        metrics_scores['mean_ontology_dist'] = np.nan
-                        metrics_scores['median_ontology_dist'] = np.nan
-                        metrics_scores['mean_avg_neighbor_ontology_dist'] = np.nan
+                        metrics_scores[f'mean_{_onto_col}'] = np.nan
+                        metrics_scores[f'median_{_onto_col}'] = np.nan
+                        metrics_scores[f'mean_{_avg_nb_col}'] = np.nan
                         per_cell_distances = [np.nan] * len(predictions)
                         avg_neighbor_distances = [np.nan] * len(predictions)
                     
@@ -384,8 +410,8 @@ def run_benchmark(
                         'vote_percentage': vote_percentages,
                         'mean_euclidean_distance': mean_euclidean_distances,
                         'nearest_neighbor_euclidean_distance': nearest_neighbor_distances,
-                        'ontology_distance': per_cell_distances if per_cell_distances else [np.nan] * len(predictions),
-                        'avg_neighbor_ontology_distance': avg_neighbor_distances if avg_neighbor_distances else [np.nan] * len(predictions),
+                        _onto_col: per_cell_distances if per_cell_distances else [np.nan] * len(predictions),
+                        _avg_nb_col: avg_neighbor_distances if avg_neighbor_distances else [np.nan] * len(predictions),
                         'dataset': ds_id,
                         'index_type': index_name,
                         'metric': metric
@@ -436,9 +462,16 @@ def run_benchmark(
         print("\nBenchmark Results Summary:")
         print(df_results.to_string())
         
-        # Save to file
-        results_path = os.path.join(RESULTS_DIR, "benchmark_results.csv")
-        df_results.to_csv(results_path, index=False)
+        # Save to file (vertical format: one metric per row for readability)
+        results_path = os.path.join(RESULTS_DIR, "benchmark_results.tsv")
+        # Round numeric columns to 4 decimal places for readability
+        df_rounded = df_results.copy()
+        numeric_cols = df_rounded.select_dtypes(include='number').columns
+        df_rounded[numeric_cols] = df_rounded[numeric_cols].round(4)
+        df_vertical = df_rounded.T  # transpose: columns become rows
+        df_vertical.columns = [f"run_{i}" for i in range(len(df_rounded))]
+        df_vertical.index.name = "metric"
+        df_vertical.to_csv(results_path, sep='\t')
         print(f"\nResults saved to {results_path}")
         
         # Generate visualizations if requested
@@ -479,11 +512,11 @@ def run_benchmark(
                 
                 if os.path.exists(per_cell_dir):
                     df_per_cell = load_per_cell_results(per_cell_dir)
-                    stats = calculate_ontology_statistics(df_per_cell)
+                    stats = calculate_ontology_statistics(df_per_cell, ontology_method=ontology_method)
                     report_path = os.path.join(analysis_dir, "ontology_analysis_report.txt")
                     os.makedirs(analysis_dir, exist_ok=True)
-                    generate_summary_report(df_per_cell, stats, report_path)
-                    analyze_distance_metric_relationship(df_per_cell, analysis_dir)
+                    generate_summary_report(df_per_cell, stats, report_path, ontology_method=ontology_method)
+                    analyze_distance_metric_relationship(df_per_cell, analysis_dir, ontology_method=ontology_method)
                     print(f"Ontology analysis complete. Results saved to {analysis_dir}")
                 else:
                     print(f"Per-cell results directory not found: {per_cell_dir}")
@@ -493,41 +526,20 @@ def run_benchmark(
                 traceback.print_exc()
         
         # Persist results: upload to S3 if enabled, otherwise save locally
+        print(f"\nResults saved to {RESULTS_DIR}")
         if download_s3:
-            print(f"\nUploading results to s3://{s3_bucket}/{s3_prefix.rstrip('/')}/benchmark_results/{TIMESTAMP}/...")
+            print(f"Uploading results to s3://{s3_bucket}/{s3_prefix.rstrip('/')}/benchmark_results/{TIMESTAMP}/...")
             try:
                 s3_uri = upload_results_to_s3(s3_bucket, s3_prefix, RESULTS_DIR, TIMESTAMP)
                 print(f"Results available at {s3_uri}")
-                shutil.rmtree(RESULTS_DIR, ignore_errors=True)
             except Exception as e:
                 print(f"WARNING: S3 upload failed: {e}")
-                print(f"Results are still in temp directory: {RESULTS_DIR}")
                 logger.error(f"S3 upload failed: {e}")
-        else:
-            final_dir = os.path.join("benchmark_results", TIMESTAMP)
-            os.makedirs(os.path.dirname(final_dir), exist_ok=True)
-            shutil.move(RESULTS_DIR, final_dir)
-            print(f"\nResults saved to {final_dir}")
     else:
         print("\nNo results generated.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Benchmarking")
-    parser.add_argument("--index", type=str, default=DEFAULT_INDEX,
-                        help="Path to FAISS index file (default: indices/index_ivfflat.faiss)")
-    parser.add_argument("--test_dir", type=str, default=DEFAULT_TEST_DIR)
-    parser.add_argument("--ref_annot", type=str, default=DEFAULT_REF_ANNOTATION)
-    parser.add_argument("--obo", type=str, default=DEFAULT_OBO_PATH)
-    parser.add_argument("--no-s3", action="store_true", help="Skip downloading data from S3")
-    parser.add_argument("--s3_bucket", type=str, default=None,
-                        help="S3 bucket name (required unless --no-s3)")
-    parser.add_argument("--s3_prefix", type=str, default=None,
-                        help="S3 key prefix, e.g. 'combined_UCE_5neuro/' (required unless --no-s3)")
-    parser.add_argument("--generate-plots", action="store_true", help="Generate UMAP plots and confusion matrices")
-    parser.add_argument("--output-dir", type=str, default=None, help="Directory for visualization outputs (default: visualizations/)")
-    parser.add_argument("--ontology-method", type=str, default="ic", choices=["ic", "shortest_path"],
-                        help="Ontology scoring method: 'ic' for Lin similarity with Zhou IC (default), "
-                             "'shortest_path' for shortest undirected path distance")
+    parser = build_parser()
     args = parser.parse_args()
     
     index_file = args.index
@@ -541,8 +553,8 @@ if __name__ == "__main__":
         index_paths,
         args.ref_annot,
         args.test_dir,
-        args.obo,
-        download_s3=not args.no_s3,
+        args.ref_ontology,
+        download_s3=args.s3,
         s3_bucket=args.s3_bucket,
         s3_prefix=args.s3_prefix,
         generate_plots=args.generate_plots,
