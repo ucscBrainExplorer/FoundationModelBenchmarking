@@ -10,7 +10,7 @@ This project benchmarks cell type prediction accuracy by comparing:
 - **Distance metrics**: Euclidean
 - **Test datasets**: Organoids, post-mortem adult brain, etc.
 
-The evaluation uses **ontology-aware metrics** based on Cell Ontology (CL) graph structures to measure how semantically "close" predictions are to ground truth in the biological hierarchy. The legacy `main_benchmark.py` also computes standard metrics (accuracy, F1 score).
+The evaluation uses **ontology-aware metrics** based on Cell Ontology (CL) graph structures to measure how semantically "close" predictions are to ground truth in the biological hierarchy.
 
 ---
 
@@ -41,7 +41,7 @@ python3 evaluate.py \
   --ground_truth test_data/ground_truth.tsv \
   --obo reference_data/cl.obo \
   --ontology-method ic \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 **Output:** Aggregate metrics, per-cell scores, detailed report, and visualizations.
@@ -75,7 +75,7 @@ python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
 
 # Evaluate
 python3 evaluate.py --predictions preds.tsv --ground_truth truth.tsv \
-  --obo cl.obo --output eval_results/
+  --obo cl.obo --output-dir eval_results/
 ```
 
 #### Workflow B: External Predictions
@@ -86,7 +86,7 @@ python3 annotate_cl_terms.py --obo cl.obo \
 
 # Evaluate
 python3 evaluate.py --predictions annotated.tsv --ground_truth truth.tsv \
-  --obo cl.obo --output eval_results/
+  --obo cl.obo --output-dir eval_results/
 ```
 
 #### Workflow C: Predict Only (no ground truth)
@@ -102,40 +102,6 @@ python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
 - **[Quick Start Guide](docs/QUICK_START.md)** — Get started quickly with all three programs
 - **[Detailed Usage](docs/USAGE.md)** — All options, examples, troubleshooting
 - **[API Reference](docs/API.md)** — Programmatic usage
-
----
-
-## Legacy: `main_benchmark.py`
-
-The original monolithic benchmarking script is still available for backwards compatibility. It couples prediction and evaluation in a single loop and requires ground truth labels.
-
-### Running on the Cluster
-
-```bash
-# Deploy to Kubernetes
-kubectl delete job fm-benchmark-job -n braingeneers 2>/dev/null
-kubectl apply -f benchmarking-job.yaml
-
-# Monitor
-kubectl logs -n braingeneers -l job-name=fm-benchmark-job -f
-
-# Get results from S3
-aws s3 ls s3://latentbrain/combined_UCE_5neuro/benchmark_results/
-aws s3 cp --recursive s3://latentbrain/combined_UCE_5neuro/benchmark_results/{timestamp}/ ./benchmark_results/{timestamp}/
-```
-
-### Running Locally
-
-```bash
-python3 main_benchmark.py \
-  --index indices/index_ivfflat.faiss \
-  --test_dir test_data \
-  --ref_annot reference_data/prediction_obs.tsv \
-  --ref_ontology reference_data/cl.obo \
-  --ontology-method ic
-```
-
-Results are saved to `./benchmark_results/{timestamp}/`.
 
 ---
 
@@ -177,11 +143,9 @@ FoundationModelBenchmarking/
 ├── annotate_cl_terms.py           # NEW: Standalone annotation
 ├── obo_parser.py                  # NEW: OBO file parsing
 │
-├── main_benchmark.py              # Legacy monolithic script
 ├── data_loader.py                 # Data ingestion, S3 download/upload
 ├── prediction_module.py           # KNN search and voting logic
 ├── ontology_utils.py              # Cell Ontology: IC similarity + path distance
-├── evaluation_metrics.py          # Accuracy, F1, Top-k metrics
 ├── analyze_ontology_results.py    # Statistical analysis and reporting
 ├── visualization.py               # UMAP plots and confusion matrices
 │
@@ -197,10 +161,8 @@ FoundationModelBenchmarking/
 │
 ├── unit-tests/                    # Legacy test suite
 │   ├── test_ontology_utils.py     # 32 tests (IC similarity, path distance, scoring)
-│   ├── test_evaluation_metrics.py # 12 tests
 │   ├── test_prediction_module.py  # 10 tests (requires faiss)
-│   ├── test_data_loader.py        # 8 tests (requires faiss)
-│   └── test_main_benchmark.py     # 11 tests (requires faiss)
+│   └── test_data_loader.py        # 8 tests (requires faiss)
 │
 ├── docs/                          # Documentation
 │   ├── QUICK_START.md             # Quick start guide
@@ -209,7 +171,6 @@ FoundationModelBenchmarking/
 │
 ├── requirements.txt               # Python dependencies
 ├── Dockerfile                     # Container definition
-├── benchmarking-job.yaml          # Kubernetes job configuration
 ├── BUGFIX_NOTES.md                # Documents 6 bug fixes with lessons
 ├── IC_FORMULA_ANALYSIS.md         # IC formula comparison and analysis
 ├── CHANGELOG.md                   # Commit-level change log
@@ -222,9 +183,9 @@ FoundationModelBenchmarking/
 | File | Format | Key Details |
 |------|--------|-------------|
 | FAISS index (`*.faiss`) | Binary FAISS index | IVF Flat, IVF PQ, or any FAISS type |
-| Reference annotations (`prediction_obs.tsv`) | TSV | Columns: `cell_type_ontology_term_id`, `cell_type`. Row order must match FAISS index. |
+| Reference annotations (`prediction_obs.tsv`) | TSV | Required: `cell_type_ontology_term_id`. Optional: `cell_type`. Row order must match FAISS index. |
 | Test embeddings (`{dataset_id}_*.npy`) | NumPy binary | Shape: `(n_cells, embedding_dim)`, float32/64. Matched to metadata by shared `{dataset_id}` prefix. |
-| Test metadata (`{dataset_id}_prediction_obs.tsv`) | TSV | Columns: `cell_type_ontology_term_id`, `cell_type`. The `{dataset_id}` is everything before `_prediction_obs.tsv`. |
+| Test metadata (`{dataset_id}_prediction_obs.tsv`) | TSV | Required: `cell_type_ontology_term_id`. Optional: `cell_type`, `cell_id`. The `{dataset_id}` is everything before `_prediction_obs.tsv`. |
 | Cell Ontology (`cl.obo`) | OBO | Source: [OBO Foundry](http://obofoundry.org/ontology/cl.html) |
 
 ## Local Development
@@ -242,10 +203,7 @@ python3 annotate_cl_terms.py --help
 # Run tests
 pip install pytest pytest-cov
 pytest tests/ -v
-
-# Run legacy benchmark
-python3 main_benchmark.py --index idx.faiss --test_dir test_data \
-  --ref_annot ref.tsv --ref_ontology cl.obo --ontology-method ic
+pytest unit-tests/ -v  # Legacy test suite
 ```
 
 ## References
