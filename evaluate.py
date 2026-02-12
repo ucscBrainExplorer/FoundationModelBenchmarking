@@ -2,9 +2,10 @@
 """
 Evaluate cell type predictions against ground truth using ontology-based metrics.
 
-Accepts predictions from predict.py or any external tool -- only requires two
-columns: cell_id + predicted CL term ID. The primary metrics are IC similarity
-or shortest-path distance; exact CL term match rate is supplementary.
+Accepts predictions from predict.py or any external tool. Matches predictions to
+ground truth by row index (row-by-row). Files must have the same number of rows
+in the same order. The primary metrics are IC similarity or shortest-path distance;
+exact CL term match rate is supplementary.
 
 Usage:
   python3 evaluate.py \
@@ -12,7 +13,7 @@ Usage:
     --ground_truth test_data/dataset_prediction_obs.tsv \
     --obo reference_data/cl.obo \
     --ontology-method ic \
-    --output evaluation_results/
+    --output-dir evaluation_results/
 """
 
 import argparse
@@ -35,9 +36,9 @@ def build_parser():
         description="Evaluate cell type predictions against ground truth using ontology metrics"
     )
     parser.add_argument("--predictions", type=str, required=True,
-                        help="Predictions TSV (min columns: cell_id + CL term ID)")
+                        help="Predictions TSV. Must have same row count and order as ground_truth.")
     parser.add_argument("--ground_truth", type=str, required=True,
-                        help="Ground truth TSV (min columns: cell_id + CL term ID)")
+                        help="Ground truth TSV. Must have same row count and order as predictions.")
     parser.add_argument("--obo", type=str, required=True,
                         help="Cell Ontology OBO file")
     parser.add_argument("--ontology-method", type=str, default="ic",
@@ -45,15 +46,11 @@ def build_parser():
                         help="Ontology scoring method (default: ic)")
     parser.add_argument("--pred_id_col", type=str,
                         default="predicted_cell_type_ontology_term_id",
-                        help="CL term ID column in predictions file")
-    parser.add_argument("--pred_cell_id_col", type=str, default="cell_id",
-                        help="Cell ID column in predictions file")
+                        help="CL term ID column in predictions file (default: predicted_cell_type_ontology_term_id)")
     parser.add_argument("--truth_id_col", type=str,
                         default="cell_type_ontology_term_id",
-                        help="CL term ID column in ground truth file")
-    parser.add_argument("--truth_cell_id_col", type=str, default="cell_id",
-                        help="Cell ID column in ground truth file")
-    parser.add_argument("--output", type=str, default="evaluation_results",
+                        help="CL term ID column in ground truth file (default: cell_type_ontology_term_id)")
+    parser.add_argument("--output-dir", type=str, default="evaluation_results",
                         help="Output directory (default: evaluation_results/)")
     return parser
 
@@ -62,16 +59,12 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    output_dir = args.output
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Read predictions
     print(f"Loading predictions from {args.predictions}...")
     pred_df = pd.read_csv(args.predictions, sep='\t')
-    if args.pred_cell_id_col not in pred_df.columns:
-        print(f"Error: column '{args.pred_cell_id_col}' not found in predictions file.")
-        print(f"  Available columns: {list(pred_df.columns)}")
-        sys.exit(1)
     if args.pred_id_col not in pred_df.columns:
         print(f"Error: column '{args.pred_id_col}' not found in predictions file.")
         print(f"  Available columns: {list(pred_df.columns)}")
@@ -81,42 +74,33 @@ def main():
     # 2. Read ground truth
     print(f"Loading ground truth from {args.ground_truth}...")
     truth_df = pd.read_csv(args.ground_truth, sep='\t')
-    if args.truth_cell_id_col not in truth_df.columns:
-        print(f"Error: column '{args.truth_cell_id_col}' not found in ground truth file.")
-        print(f"  Available columns: {list(truth_df.columns)}")
-        sys.exit(1)
     if args.truth_id_col not in truth_df.columns:
         print(f"Error: column '{args.truth_id_col}' not found in ground truth file.")
         print(f"  Available columns: {list(truth_df.columns)}")
         sys.exit(1)
     print(f"  Loaded {len(truth_df)} ground truth entries")
 
-    # 3. Inner join on cell_id
-    pred_subset = pred_df[[args.pred_cell_id_col, args.pred_id_col]].copy()
-    pred_subset.columns = ['cell_id', 'predicted_cl_term_id']
+    # 3. Match by row index - validate same row count
+    print(f"\nMatching predictions to ground truth by row index...")
+    print(f"  Predictions: {len(pred_df)} rows")
+    print(f"  Ground truth: {len(truth_df)} rows")
 
-    truth_subset = truth_df[[args.truth_cell_id_col, args.truth_id_col]].copy()
-    truth_subset.columns = ['cell_id', 'truth_cl_term_id']
-
-    merged = pred_subset.merge(truth_subset, on='cell_id', how='inner')
-    print(f"  Matched {len(merged)} cells (inner join on cell_id)")
-
-    if len(merged) == 0:
-        print("Error: no matching cell IDs between predictions and ground truth.")
-        print(f"  Prediction cell IDs (first 5): {pred_subset['cell_id'].head().tolist()}")
-        print(f"  Ground truth cell IDs (first 5): {truth_subset['cell_id'].head().tolist()}")
+    if len(pred_df) != len(truth_df):
+        print(f"\nError: Row count mismatch!")
+        print(f"  Predictions file has {len(pred_df)} rows")
+        print(f"  Ground truth file has {len(truth_df)} rows")
+        print(f"  Files must have the same number of rows in the same order.")
         sys.exit(1)
 
-    n_pred_only = len(pred_subset) - len(merged)
-    n_truth_only = len(truth_subset) - len(merged)
-    if n_pred_only > 0:
-        print(f"  Note: {n_pred_only} prediction cells not in ground truth (excluded)")
-    if n_truth_only > 0:
-        print(f"  Note: {n_truth_only} ground truth cells not in predictions (excluded)")
+    print(f"  ✓ Row counts match ({len(pred_df)} cells)")
+    print(f"  Matching row 0 → row 0, row 1 → row 1, etc.\n")
 
-    predictions = merged['predicted_cl_term_id'].tolist()
-    ground_truth = merged['truth_cl_term_id'].tolist()
-    cell_ids = merged['cell_id'].tolist()
+    # Extract columns by row index (already aligned)
+    predictions = pred_df[args.pred_id_col].tolist()
+    ground_truth = truth_df[args.truth_id_col].tolist()
+
+    # Generate cell indices for output (since no cell_id column)
+    cell_ids = [f"row_{i}" for i in range(len(predictions))]
 
     # 4. Load ontology and precompute IC
     print(f"Loading ontology from {args.obo}...")
@@ -191,7 +175,7 @@ def main():
             stats['median'],
             stats['std'],
             exact_match_rate,
-            len(merged),
+            len(predictions),
         ]
     }
     summary_df = pd.DataFrame(summary_data)
@@ -213,7 +197,7 @@ def main():
     print(f"\n{'=' * 60}")
     print("EVALUATION SUMMARY")
     print(f"{'=' * 60}")
-    print(f"Cells evaluated: {len(merged)}")
+    print(f"Cells evaluated: {len(predictions)}")
     print(f"Exact CL term match rate: {exact_match_rate:.4f}")
     valid_scores = [s for s in per_cell_scores if not (s != s)]  # filter NaN
     if valid_scores:

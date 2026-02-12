@@ -47,9 +47,9 @@ def load_reference_annotations(path: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(path, sep='\t')
         
-        required_columns = ['cell_type_ontology_term_id', 'cell_type']
+        required_columns = ['cell_type_ontology_term_id']
         if not all(col in df.columns for col in required_columns):
-            raise ValueError(f"Annotation file must contain columns: {required_columns}")
+            raise ValueError(f"Annotation file must contain column: {required_columns[0]}")
             
         return df
     except Exception as e:

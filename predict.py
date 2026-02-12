@@ -40,7 +40,7 @@ def build_parser():
     parser.add_argument("--embeddings", type=str, required=True,
                         help="Test embeddings file (.npy)")
     parser.add_argument("--metadata", type=str, default=None,
-                        help="Test metadata TSV (for cell_id column). If omitted, IDs auto-generated.")
+                        help="Optional test metadata TSV. All columns will be included in output.")
     parser.add_argument("--k", type=int, default=30,
                         help="Number of nearest neighbors (default: 30)")
     parser.add_argument("--output", type=str, default="predictions.tsv",
@@ -52,57 +52,66 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # 1. Load FAISS index
-    print(f"Loading FAISS index from {args.index}...")
-    index = load_faiss_index(args.index)
-    print(f"  Index loaded (dimension: {index.d}, vectors: {index.ntotal})")
+    # 1. Validate output path is writable (fail fast, no side effects)
+    output_dir = os.path.dirname(args.output)
+    if output_dir and not os.path.exists(output_dir):
+        # Check if parent directory exists so we can create output_dir later
+        parent_dir = os.path.dirname(output_dir)
+        if parent_dir and not os.path.exists(parent_dir):
+            print(f"Error: Parent directory '{parent_dir}' does not exist for output path '{args.output}'")
+            sys.exit(1)
 
-    # 2. Load reference annotations (used only for cell_type_ontology_term_id during voting)
+    # 2. Load reference annotations (fast, catches column errors early)
     print(f"Loading reference annotations from {args.ref_annot}...")
     ref_df = load_reference_annotations(args.ref_annot)
     print(f"  Loaded {len(ref_df)} reference cells")
 
-    # 3. Parse OBO file -> {CL_id: canonical_name} dict
+    # 3. Parse OBO file -> {CL_id: canonical_name} dict (fast)
     print(f"Parsing OBO file {args.obo}...")
     cl_names = parse_obo_names(args.obo)
     print(f"  Parsed {len(cl_names)} ontology terms")
 
-    # 4. Load embeddings
+    # 4. Load embeddings (medium cost)
     print(f"Loading embeddings from {args.embeddings}...")
     embeddings = np.load(args.embeddings)
     n_cells = embeddings.shape[0]
     print(f"  Loaded {n_cells} embeddings (dimension: {embeddings.shape[1]})")
 
-    # 5. Get cell IDs
+    # 5. Load metadata if provided (fast) - all columns will be included in output
+    metadata_df = None
     if args.metadata:
         print(f"Loading metadata from {args.metadata}...")
         metadata_df = pd.read_csv(args.metadata, sep='\t')
-        if 'cell_id' in metadata_df.columns:
-            cell_ids = metadata_df['cell_id'].tolist()
-        else:
-            print("  Warning: no 'cell_id' column in metadata, auto-generating IDs")
-            cell_ids = [f"cell_{i}" for i in range(n_cells)]
-    else:
-        cell_ids = [f"cell_{i}" for i in range(n_cells)]
 
-    if len(cell_ids) != n_cells:
-        print(f"  Warning: metadata has {len(cell_ids)} rows but embeddings has {n_cells} rows. "
-              f"Using first {n_cells} IDs.")
-        cell_ids = cell_ids[:n_cells]
+        # Validate metadata has same number of rows as embeddings
+        if len(metadata_df) != n_cells:
+            print(f"  Warning: metadata has {len(metadata_df)} rows but embeddings has {n_cells} rows.")
+            if len(metadata_df) > n_cells:
+                print(f"  Using first {n_cells} rows of metadata.")
+                metadata_df = metadata_df.iloc[:n_cells].copy()
+            else:
+                print(f"  Error: metadata has fewer rows than embeddings. Cannot proceed.")
+                sys.exit(1)
+        print(f"  Loaded metadata with {len(metadata_df.columns)} columns: {list(metadata_df.columns)}")
 
-    # 6. Query FAISS
+    # 6. Load FAISS index (expensive - only after all validations pass)
+    print(f"Loading FAISS index from {args.index}...")
+    index = load_faiss_index(args.index)
+    print(f"  Index loaded (dimension: {index.d}, vectors: {index.ntotal})")
+
+    # 7. Query FAISS
     print(f"Querying FAISS index (k={args.k})...")
     dists, neighbor_indices = execute_query(index, embeddings, k=args.k)
     print(f"  Query complete for {n_cells} cells")
 
-    # 7. Majority vote
+    # 8. Majority vote
     print("Performing majority voting...")
     predictions, vote_percentages = vote_neighbors(neighbor_indices, ref_df)
 
-    # 8. Map predicted CL term IDs -> canonical readable names via OBO dict
+    # 9. Map predicted CL term IDs -> canonical readable names via OBO dict
     predicted_names = [cl_names.get(pred, pred) for pred in predictions]
 
-    # 9-10. Map each neighbor's CL term ID -> canonical readable name, sorted by distance
+    # 10. Map each neighbor's CL term ID -> canonical readable name, sorted by distance
     ref_term_ids = ref_df['cell_type_ontology_term_id'].values
     neighbor_distances_list = []
     neighbor_names_list = []
@@ -119,7 +128,7 @@ def main():
         pairs.sort(key=lambda x: x[0])
 
         sorted_dists = [p[0] for p in pairs]
-        sorted_names = [cl_names.get(ref_term_ids[p[1]], ref_term_ids[p[1]]) for p in pairs]
+        sorted_names = [str(cl_names.get(ref_term_ids[p[1]], ref_term_ids[p[1]])) for p in pairs]
 
         neighbor_distances_list.append(",".join(f"{d:.4f}" for d in sorted_dists))
         neighbor_names_list.append(",".join(sorted_names))
@@ -134,8 +143,7 @@ def main():
             mean_euclidean_distances.append(float('nan'))
 
     # 11. Build output DataFrame
-    output_df = pd.DataFrame({
-        'cell_id': cell_ids,
+    predictions_df = pd.DataFrame({
         'predicted_cell_type_ontology_term_id': predictions,
         'predicted_cell_type': predicted_names,
         'vote_percentage': vote_percentages,
@@ -143,6 +151,15 @@ def main():
         'neighbor_distances': neighbor_distances_list,
         'neighbor_cell_types': neighbor_names_list,
     })
+
+    # If metadata was provided, prepend all metadata columns to output
+    if metadata_df is not None:
+        # Concatenate metadata + predictions side-by-side (same row order)
+        output_df = pd.concat([metadata_df.reset_index(drop=True),
+                               predictions_df.reset_index(drop=True)],
+                              axis=1)
+    else:
+        output_df = predictions_df
 
     # Save
     output_dir = os.path.dirname(args.output)

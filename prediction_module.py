@@ -51,14 +51,14 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
                                               Assumes index of DataFrame aligns with FAISS index IDs.
 
     Returns:
-        Tuple[List[str], List[float]]: 
+        Tuple[List[str], List[float]]:
             - Predicted cell_type_terminology_id for each query (empty string if all neighbors missing)
-            - Vote percentage (0.0-1.0) for the winning prediction
-    
+            - Vote percentage (0.0-1.0) for the winning prediction, or NaN if no valid votes
+
     Note:
         Invalid labels (NaN, empty strings, None) are filtered out before voting.
         Only neighbors with valid cell_type_ontology_term_id values participate in the vote.
-        If all neighbors have missing labels, an empty string is returned with 0.0 percentage.
+        If all neighbors have missing labels, an empty string is returned with NaN percentage.
     """
     predictions = []
     vote_percentages = []
@@ -83,7 +83,7 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
         valid_indices = row_indices[valid_mask]
         if len(valid_indices) == 0:
             predictions.append('')
-            vote_percentages.append(0.0)
+            vote_percentages.append(float('nan'))
             continue
         # Retrieve the terms for the valid neighbors
         neighbor_terms = term_ids[valid_indices]
@@ -98,10 +98,10 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
                 if term_str != '' and term_str.lower() != 'nan':
                     valid_terms.append(term_str)
         
-        # If no valid labels found, return empty string with 0.0 percentage
+        # If no valid labels found, return empty string with NaN percentage
         if len(valid_terms) == 0:
             predictions.append('')
-            vote_percentages.append(0.0)
+            vote_percentages.append(float('nan'))
             continue
         
         # Majority vote among valid labels only

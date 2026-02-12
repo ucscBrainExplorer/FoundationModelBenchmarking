@@ -31,7 +31,7 @@ def test_evaluate_parser_with_all_required():
     assert args.ground_truth == 'truth.tsv'
     assert args.obo == 'cl.obo'
     assert args.ontology_method == 'ic'  # default
-    assert args.output == 'evaluation_results'  # default
+    assert args.output_dir == 'evaluation_results'  # default
 
 
 def test_evaluate_parser_column_overrides():
@@ -44,14 +44,10 @@ def test_evaluate_parser_column_overrides():
         '--obo', 'cl.obo',
         '--pred_id_col', 'my_pred_col',
         '--truth_id_col', 'my_truth_col',
-        '--pred_cell_id_col', 'my_cell_id',
-        '--truth_cell_id_col', 'my_cell_id',
     ])
 
     assert args.pred_id_col == 'my_pred_col'
     assert args.truth_id_col == 'my_truth_col'
-    assert args.pred_cell_id_col == 'my_cell_id'
-    assert args.truth_cell_id_col == 'my_cell_id'
 
 
 def test_evaluate_parser_ontology_methods():

@@ -30,9 +30,10 @@ python3 predict.py \
 ```
 
 **Output:** `predictions.tsv` with columns:
-- `cell_id`, `predicted_cell_type_ontology_term_id`, `predicted_cell_type`
+- `predicted_cell_type_ontology_term_id`, `predicted_cell_type`
 - `vote_percentage`, `mean_euclidean_distance`
 - `neighbor_distances`, `neighbor_cell_types`
+- Plus all metadata columns if `--metadata` provided
 
 ### Step 2: Evaluate predictions
 
@@ -42,7 +43,7 @@ python3 evaluate.py \
   --ground_truth test_data/dataset_prediction_obs.tsv \
   --obo reference_data/cl.obo \
   --ontology-method ic \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 **Output:** `evaluation_results/` directory containing:
@@ -85,7 +86,7 @@ python3 evaluate.py \
   --pred_id_col cell_type_ontology_term_id \
   --ground_truth ground_truth.tsv \
   --obo reference_data/cl.obo \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 **Note:** Use `--pred_id_col` and `--truth_id_col` to specify custom column names if your files don't use the defaults.
@@ -142,7 +143,7 @@ Ontology-based metrics capture semantic closeness, giving partial credit for "ne
 | `--ref_annot` | yes | — | Reference annotation TSV |
 | `--obo` | yes | — | Cell Ontology OBO file |
 | `--embeddings` | yes | — | Test embeddings (.npy) |
-| `--metadata` | no | none | Test metadata TSV (for `cell_id` column) |
+| `--metadata` | no | none | Test metadata TSV. All columns will be included in output. |
 | `--k` | no | 30 | Number of nearest neighbors |
 | `--output` | no | `predictions.tsv` | Output TSV path |
 
@@ -155,10 +156,8 @@ Ontology-based metrics capture semantic closeness, giving partial credit for "ne
 | `--obo` | yes | — | Cell Ontology OBO file |
 | `--ontology-method` | no | `ic` | `ic` or `shortest_path` |
 | `--pred_id_col` | no | `predicted_cell_type_ontology_term_id` | CL term ID column in predictions |
-| `--pred_cell_id_col` | no | `cell_id` | Cell ID column in predictions |
 | `--truth_id_col` | no | `cell_type_ontology_term_id` | CL term ID column in ground truth |
-| `--truth_cell_id_col` | no | `cell_id` | Cell ID column in ground truth |
-| `--output` | no | `evaluation_results/` | Output directory |
+| `--output-dir` | no | `evaluation_results/` | Output directory |
 
 ### `annotate_cl_terms.py`
 
@@ -170,23 +169,6 @@ Ontology-based metrics capture semantic closeness, giving partial credit for "ne
 | `--name_col` | no | `cell_type` | Column with readable cell type names |
 
 **LLM fallback:** Requires `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` environment variables for unmatched names.
-
----
-
-## Legacy: `main_benchmark.py`
-
-The original monolithic benchmarking script is still available for backwards compatibility:
-
-```bash
-python3 main_benchmark.py \
-  --index indices/index_ivfflat.faiss \
-  --test_dir test_data \
-  --ref_annot reference_data/prediction_obs.tsv \
-  --ref_ontology reference_data/cl.obo \
-  --ontology-method ic
-```
-
-This couples prediction and evaluation in a single loop and requires ground truth labels in the test data.
 
 ---
 

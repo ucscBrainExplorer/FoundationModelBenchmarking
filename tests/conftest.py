@@ -80,7 +80,6 @@ def sample_reference_annotations(temp_dir):
 def sample_predictions(temp_dir):
     """Create sample predictions TSV."""
     df = pd.DataFrame({
-        'cell_id': [f"cell_{i}" for i in range(10)],
         'predicted_cell_type_ontology_term_id': ['CL:0000540'] * 6 + ['CL:0000128'] * 4,
         'predicted_cell_type': ['neuron'] * 6 + ['oligodendrocyte'] * 4,
         'vote_percentage': [0.8] * 10,
@@ -97,7 +96,6 @@ def sample_predictions(temp_dir):
 def sample_ground_truth(temp_dir):
     """Create sample ground truth TSV."""
     df = pd.DataFrame({
-        'cell_id': [f"cell_{i}" for i in range(10)],
         'cell_type_ontology_term_id': ['CL:0000540'] * 5 + ['CL:0000128'] * 5,
         'cell_type': ['neuron'] * 5 + ['oligodendrocyte'] * 5,
     })

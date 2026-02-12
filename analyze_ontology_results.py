@@ -207,6 +207,26 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
         f.write(f"{report_title}\n")
         f.write("=" * 80 + "\n\n")
 
+        # Evaluation Summary
+        f.write("=" * 60 + "\n")
+        f.write("EVALUATION SUMMARY\n")
+        f.write("=" * 60 + "\n")
+
+        # Calculate total cells and exact match rate
+        total_cells = len(df)
+        if 'true_label' in df.columns and 'prediction_label' in df.columns:
+            exact_matches = (df['true_label'] == df['prediction_label']).sum()
+            exact_match_rate = exact_matches / total_cells if total_cells > 0 else 0.0
+            f.write(f"Cells evaluated: {total_cells}\n")
+            f.write(f"Exact CL term match rate: {exact_match_rate:.4f}\n")
+        else:
+            f.write(f"Cells evaluated: {total_cells}\n")
+
+        # Write ontology statistics
+        f.write(f"Mean ontology {metric_noun}: {stats['mean']:.4f}\n")
+        f.write(f"Median ontology {metric_noun}: {stats['median']:.4f}\n")
+        f.write("=" * 60 + "\n\n")
+
         # Metric interpretation guide
         f.write("METRIC INTERPRETATION\n")
         f.write("-" * 80 + "\n")
@@ -283,19 +303,19 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
                     f.write(f"  ... and {len(dist_dict) - 20} more {metric_noun} values\n")
             f.write("\n")
 
-        # Relationship to accuracy
-        f.write("RELATIONSHIP TO ACCURACY METRICS\n")
+        # Relationship to exact match
+        f.write("RELATIONSHIP TO EXACT MATCH\n")
         f.write("-" * 80 + "\n")
         valid_df = df[df[col].notna() & (df[col] >= 0)].copy()
         if len(valid_df) > 0:
             valid_df['is_correct'] = (valid_df['true_label'] == valid_df['prediction_label']).astype(int)
 
-            # Overall accuracy
+            # Overall exact match rate
             overall_accuracy = valid_df['is_correct'].mean()
-            f.write(f"Overall accuracy (exact match): {overall_accuracy:.4f}\n\n")
+            f.write(f"Overall exact match rate: {overall_accuracy:.4f}\n\n")
 
-            # Accuracy by score
-            f.write(f"Accuracy by Ontology {value_label}:\n")
+            # Exact match rate by score
+            f.write(f"Exact Match Rate by Ontology {value_label}:\n")
             if is_similarity:
                 # Bucket continuous similarities into ranges
                 bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
@@ -305,23 +325,23 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
                 for interval in bin_acc.index:
                     count = int(bin_acc.loc[interval, 'count'])
                     acc = bin_acc.loc[interval, 'mean']
-                    f.write(f"  {value_label} {interval}: {acc:.4f} accuracy ({count} cells)\n")
+                    f.write(f"  {value_label} {interval}: {acc:.4f} exact match rate ({count} cells)\n")
                 valid_df.drop(columns=['_bin'], inplace=True)
             else:
                 score_acc = valid_df.groupby(col)['is_correct'].agg(['count', 'mean'])
                 for val in sorted(score_acc.index)[:15]:
                     count = int(score_acc.loc[val, 'count'])
                     acc = score_acc.loc[val, 'mean']
-                    f.write(f"  {value_label} {val}: {acc:.4f} accuracy ({count} cells)\n")
+                    f.write(f"  {value_label} {val}: {acc:.4f} exact match rate ({count} cells)\n")
             f.write("\n")
 
             # Correlation
             correlation = valid_df[col].corr(valid_df['is_correct'])
-            f.write(f"Correlation between {metric_noun} and correctness: {correlation:.4f}\n")
+            f.write(f"Correlation between {metric_noun} and exact match: {correlation:.4f}\n")
             if is_similarity:
-                f.write("(Positive correlation indicates higher similarity associated with correct predictions)\n")
+                f.write("(Positive correlation indicates higher similarity associated with exact matches)\n")
             else:
-                f.write("(Negative correlation indicates smaller distances associated with correct predictions)\n")
+                f.write("(Negative correlation indicates smaller distances associated with exact matches)\n")
 
         f.write("\n" + "=" * 80 + "\n")
         f.write("End of Report\n")

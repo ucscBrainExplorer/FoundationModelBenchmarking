@@ -66,7 +66,6 @@ def test_predict_output_format(sample_predictions):
     path, df = sample_predictions
 
     required_cols = [
-        'cell_id',
         'predicted_cell_type_ontology_term_id',
         'predicted_cell_type',
         'vote_percentage',
