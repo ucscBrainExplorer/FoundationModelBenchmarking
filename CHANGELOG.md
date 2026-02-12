@@ -2,6 +2,43 @@
 
 ---
 
+## 2026-02-12 — Fix tests and update docs to align with recent code changes
+
+**Branch:** `review/student-code-fixes`
+
+### Summary
+
+Updated tests and documentation to reflect behavioral changes from recent refactoring. Fixed one failing test and corrected documentation to accurately describe current code behavior.
+
+### Changes
+
+#### Tests Fixed
+
+**`unit-tests/test_prediction_module.py`**
+- Fixed `test_execute_query_cosine` to verify `ValueError` is correctly raised when cosine metric is used with L2-built FAISS index
+- Previously expected successful execution; now correctly tests for error condition
+
+#### Documentation Updated
+
+**`docs/README_UPDATE.md`**
+- Fixed 3 occurrences: `--output` → `--output-dir` in `evaluate.py` examples
+- Ensures all workflow examples use correct argument name
+
+**`docs/API.md`**
+- Updated `load_reference_annotations()` documentation to clarify only `cell_type_ontology_term_id` column is required
+- Removed incorrect requirement for `cell_type` column
+
+**`docs/USAGE.md`**
+- Updated Reference Annotations section: only `cell_type_ontology_term_id` required, `cell_type` is optional
+- Updated Ground Truth / Metadata section: `cell_id` is optional (not required), clarified it's preserved in output if provided
+- Matches actual validation in `data_loader.py` and row-index evaluation behavior
+
+### Test Results
+
+**All 77 tests pass** (17 integration tests, 60 unit tests)
+
+---
+
 ## 2026-02-12 — Split benchmarking into three standalone composable programs
 
 **Branch:** `review/student-code-fixes`

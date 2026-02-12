@@ -9,7 +9,6 @@ Programmatic usage of the benchmarking modules.
 3. [prediction_module](#prediction_module)
 4. [ontology_utils](#ontology_utils)
 5. [evaluate (analyze_ontology_results)](#analyze_ontology_results)
-6. [evaluation_metrics](#evaluation_metrics)
 
 ---
 
@@ -72,11 +71,11 @@ Load reference annotations from a TSV file.
 - `path` (str): Path to TSV file
 
 **Returns:**
-- `pd.DataFrame`: DataFrame with columns `cell_type_ontology_term_id` and `cell_type`
+- `pd.DataFrame`: DataFrame with required column `cell_type_ontology_term_id`
 
 **Raises:**
 - `FileNotFoundError`: If file doesn't exist
-- `ValueError`: If required columns are missing
+- `ValueError`: If required column is missing
 
 **Example:**
 ```python
@@ -155,7 +154,7 @@ Perform majority voting on nearest neighbors.
 **Returns:**
 - `tuple`: `(predictions, vote_percentages)`
   - `predictions` (List[str]): Predicted CL term IDs (empty string if no valid vote)
-  - `vote_percentages` (List[float]): Confidence in [0.0, 1.0]
+  - `vote_percentages` (List[float]): Confidence in [0.0, 1.0] (NaN if no valid neighbors)
 
 **Example:**
 ```python
@@ -301,33 +300,30 @@ Generate visualization and CSV analyzing ontology score vs. accuracy relationshi
 
 ---
 
-## evaluation_metrics
+## Evaluation Matching Behavior
 
-Classical accuracy and F1 metrics.
+**Important:** `evaluate.py` uses **row-by-row matching** to align predictions with ground truth. This means:
 
-### `calculate_accuracy(predictions: List[str], ground_truth: List[str], neighbor_labels: List[List[str]] = None, k: int = 30) -> Dict[str, float]`
+- Predictions and ground truth files must have the **same number of rows**
+- Rows are matched by **position/index**, not by cell_id or any join key
+- The i-th row in predictions is compared to the i-th row in ground truth
+- Both files must be in the **same order**
 
-Calculate accuracy, F1, and optionally top-k accuracy.
-
-**Args:**
-- `predictions` (List[str]): Predicted labels
-- `ground_truth` (List[str]): True labels
-- `neighbor_labels` (List[List[str]]): For each cell, list of k neighbor labels (optional)
-- `k` (int): Number of neighbors (default: 30)
-
-**Returns:**
-- `Dict[str, float]`: Metrics with keys `'accuracy'`, `'f1_macro'`, `'f1_weighted'`, optionally `'top_k_accuracy'`
+This design ensures consistent evaluation when cell identifiers may vary or be missing.
 
 **Example:**
 ```python
-from evaluation_metrics import calculate_accuracy
+# predictions.tsv (row 0, 1, 2, ...)
+predicted_cell_type_ontology_term_id
+CL:0000540
+CL:0000128
+CL:0000127
 
-predictions = ["CL:0000540", "CL:0000128", "CL:0000540"]
-ground_truth = ["CL:0000540", "CL:0000127", "CL:0000128"]
-
-metrics = calculate_accuracy(predictions, ground_truth)
-print(f"Accuracy: {metrics['accuracy']:.2f}")
-print(f"F1 (macro): {metrics['f1_macro']:.2f}")
+# ground_truth.tsv (row 0, 1, 2, ...)
+cell_type_ontology_term_id
+CL:0000540    # matched with row 0 of predictions
+CL:0000128    # matched with row 1 of predictions
+CL:0000540    # matched with row 2 of predictions
 ```
 
 ---
@@ -364,17 +360,16 @@ scores = calculate_per_cell_distances(
     method='ic', ic_values=ic_values
 )
 
-# 4. Build results DataFrame
+# 4. Build results DataFrame (row-by-row alignment)
 results_df = pd.DataFrame({
-    'cell_id': [f"cell_{i}" for i in range(len(predictions))],
     'predicted_cl_term_id': predictions,
     'truth_cl_term_id': ground_truth,
     'predicted_cell_type': [cl_names.get(p, p) for p in predictions],
     'truth_cell_type': [cl_names.get(t, t) for t in ground_truth],
     'ontology_IC_similarity': scores,
     'is_exact_match': [1 if p == t else 0 for p, t in zip(predictions, ground_truth)],
-    'true_label': ground_truth,  # alias for analyze_ontology_results
-    'prediction_label': predictions,  # alias for analyze_ontology_results
+    'true_label': ground_truth,
+    'prediction_label': predictions,
 })
 
 # 5. Generate report

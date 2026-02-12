@@ -29,7 +29,7 @@ python3 predict.py \
 
 ### Example: With Metadata
 
-If you have a metadata file with `cell_id` column:
+If you have a metadata file with additional information (all columns will be preserved in output):
 
 ```bash
 python3 predict.py \
@@ -61,7 +61,7 @@ The output TSV contains one row per cell with these columns:
 
 | Column | Type | Description |
 |---|---|---|
-| `cell_id` | string | Cell identifier (from metadata or auto-generated) |
+| `cell_id` | string | Cell identifier from metadata columns, if provided |
 | `predicted_cell_type_ontology_term_id` | string | Predicted CL term ID (e.g., "CL:0000540") |
 | `predicted_cell_type` | string | Canonical name from OBO (e.g., "neuron") |
 | `vote_percentage` | float | Confidence: fraction of k neighbors agreeing on winner |
@@ -74,7 +74,7 @@ The output TSV contains one row per cell with these columns:
 ### Important Notes
 
 - **Reference annotations:** Used only for the `cell_type_ontology_term_id` column during voting. The FAISS index vector IDs must align with the reference DataFrame row indices.
-- **Empty predictions:** Cells where all k neighbors had invalid labels will have `predicted_cell_type_ontology_term_id = ""` and `vote_percentage = 0.0`.
+- **Empty predictions:** Cells where all k neighbors had invalid labels will have `predicted_cell_type_ontology_term_id = ""` and `vote_percentage = NaN`.
 
 ---
 
@@ -91,7 +91,7 @@ python3 evaluate.py \
   --predictions predictions.tsv \
   --ground_truth test_data/ground_truth.tsv \
   --obo reference_data/cl.obo \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 ### Example: Shortest Path Distance
@@ -104,7 +104,7 @@ python3 evaluate.py \
   --ground_truth test_data/ground_truth.tsv \
   --obo reference_data/cl.obo \
   --ontology-method shortest_path \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 ### Example: External Predictions with Custom Columns
@@ -115,12 +115,10 @@ Your predictions file has different column names:
 python3 evaluate.py \
   --predictions external_preds.tsv \
   --pred_id_col predicted_cl_id \
-  --pred_cell_id_col sample_id \
   --ground_truth truth.tsv \
   --truth_id_col true_cl_id \
-  --truth_cell_id_col sample_id \
   --obo reference_data/cl.obo \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 ### Output Files
@@ -169,13 +167,13 @@ CSV with columns: ontology score, cell count, correct count, accuracy (grouped b
 ### Evaluation Logic
 
 1. Read predictions and ground truth TSVs
-2. **Inner join** on `cell_id` (only cells present in both are evaluated)
+2. **Row-by-row matching** (predictions and ground truth must have same row count and order)
 3. Load ontology, precompute IC if needed
 4. Compute per-cell ontology scores
 5. Compute exact match rate as supplementary statistic
 6. Generate aggregate statistics, report, and visualizations
 
-**Important:** Cells in predictions but not in ground truth (and vice versa) are excluded from evaluation. A warning is printed showing counts.
+**Important:** The predictions and ground truth files must have the same number of rows in the same order. Evaluation is performed by matching rows at the same index.
 
 ---
 
@@ -292,19 +290,21 @@ print(embeddings.shape)  # (1000, 128)
 
 ### Reference Annotations (TSV)
 
-Tab-separated file with required columns:
+Tab-separated file with required column:
 - `cell_type_ontology_term_id` — CL term IDs (e.g., "CL:0000540")
+
+Optional columns:
 - `cell_type` — readable names (e.g., "neuron")
 
 **Critical:** The DataFrame row index (0 to N-1) must align with FAISS index vector IDs.
 
 ### Ground Truth / Metadata (TSV)
 
-Tab-separated file with required columns:
-- `cell_id` — unique cell identifiers
+Tab-separated file with required column:
 - `cell_type_ontology_term_id` — CL term IDs
 
 Optional columns:
+- `cell_id` — unique cell identifiers (preserved in output if provided)
 - `cell_type` — readable names
 
 ### OBO File
@@ -317,14 +317,14 @@ Cell Ontology in OBO format. Download from:
 
 ## Troubleshooting
 
-### Issue: "No matching cell IDs between predictions and ground truth"
+### Issue: "Row count mismatch between predictions and ground truth"
 
-**Cause:** The `cell_id` column values don't match between files.
+**Cause:** The predictions and ground truth files have different numbers of rows.
 
-**Solution:** Check that both files use the same cell ID format. Print first few rows:
+**Solution:** Ensure both files have the same number of rows in the same order. Print row counts:
 ```bash
-head -3 predictions.tsv
-head -3 ground_truth.tsv
+wc -l predictions.tsv
+wc -l ground_truth.tsv
 ```
 
 ### Issue: "Column 'cell_type_ontology_term_id' not found"
@@ -336,7 +336,7 @@ head -3 ground_truth.tsv
 python3 evaluate.py ... --pred_id_col my_column_name
 ```
 
-### Issue: Empty predictions (vote_percentage = 0.0)
+### Issue: Empty predictions (vote_percentage = NaN)
 
 **Cause:** All k neighbors had invalid labels (NaN, empty, or "nan").
 

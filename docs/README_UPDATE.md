@@ -31,7 +31,7 @@ python3 evaluate.py \
   --ground_truth test_data/ground_truth.tsv \
   --obo reference_data/cl.obo \
   --ontology-method ic \
-  --output evaluation_results/
+  --output-dir evaluation_results/
 ```
 
 **Output:** Aggregate metrics, per-cell scores, detailed report, and visualizations.
@@ -65,7 +65,7 @@ python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
 
 # Evaluate
 python3 evaluate.py --predictions preds.tsv --ground_truth truth.tsv \
-  --obo cl.obo --output eval_results/
+  --obo cl.obo --output-dir eval_results/
 ```
 
 #### Workflow B: External Predictions
@@ -76,7 +76,7 @@ python3 annotate_cl_terms.py --obo cl.obo \
 
 # Evaluate
 python3 evaluate.py --predictions annotated.tsv --ground_truth truth.tsv \
-  --obo cl.obo --output eval_results/
+  --obo cl.obo --output-dir eval_results/
 ```
 
 #### Workflow C: Predict Only (no ground truth)
@@ -92,18 +92,5 @@ python3 predict.py --index idx.faiss --ref_annot ref.tsv --obo cl.obo \
 - **[Quick Start Guide](docs/QUICK_START.md)** — Get started quickly
 - **[Detailed Usage](docs/USAGE.md)** — All options, examples, troubleshooting
 - **[API Reference](docs/API.md)** — Programmatic usage
-
-### Legacy: `main_benchmark.py`
-
-The original monolithic benchmarking script is still available for backwards compatibility. It couples prediction and evaluation in a single loop and requires ground truth labels.
-
-```bash
-python3 main_benchmark.py \
-  --index indices/index_ivfflat.faiss \
-  --test_dir test_data \
-  --ref_annot reference_data/prediction_obs.tsv \
-  --ref_ontology reference_data/cl.obo \
-  --ontology-method ic
-```
 
 ---
