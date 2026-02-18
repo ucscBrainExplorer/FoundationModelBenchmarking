@@ -24,7 +24,7 @@ import pandas as pd
 
 from data_loader import load_faiss_index, load_reference_annotations
 from prediction_module import execute_query, vote_neighbors
-from obo_parser import parse_obo_names
+from obo_parser import parse_obo_names, parse_obo_replacements
 
 
 def build_parser():
@@ -71,6 +71,23 @@ def main():
     cl_names = parse_obo_names(args.obo)
     print(f"  Parsed {len(cl_names)} ontology terms")
 
+    # 3a. Resolve obsolete CL terms in reference annotations
+    cl_replacements = parse_obo_replacements(args.obo)
+    print(f"  Found {len(cl_replacements)} obsolete terms with replacements")
+    term_col = 'cell_type_ontology_term_id'
+    ref_terms = ref_df[term_col]
+    obsolete_mask = ref_terms.isin(cl_replacements)
+    n_replaced = int(obsolete_mask.sum())
+    # Count obsolete terms that have NO replacement (in OBO but not in replacements dict)
+    all_obsolete_ids = set(ref_terms) - set(cl_names)
+    n_unresolvable = len(all_obsolete_ids - set(cl_replacements))
+    if n_replaced > 0:
+        ref_df[term_col] = ref_terms.replace(cl_replacements)
+        print(f"  Resolved {n_replaced} obsolete reference cells to current terms")
+    if n_unresolvable > 0:
+        print(f"  {n_unresolvable} obsolete terms have no replacement and will remain as-is")
+    obsolete_comment = f"# Obsolete terms resolved: {n_replaced} replaced, {n_unresolvable} unresolvable (no replacement in OBO)\n"
+
     # 4. Load embeddings (medium cost)
     print(f"Loading embeddings from {args.embeddings}...")
     embeddings = np.load(args.embeddings)
@@ -99,9 +116,29 @@ def main():
     index = load_faiss_index(args.index)
     print(f"  Index loaded (dimension: {index.d}, vectors: {index.ntotal})")
 
+    # 6a. Validate embedding dimension matches FAISS index dimension
+    embedding_dim = embeddings.shape[1]
+    if index.d != embedding_dim:
+        print(f"Error: Dimension mismatch!")
+        print(f"  FAISS index dimension: {index.d}")
+        print(f"  Embeddings dimension: {embedding_dim}")
+        print(f"  The embeddings and FAISS index must have the same dimension.")
+        print(f"  Hint: Make sure you're using the correct index for your embedding type:")
+        print(f"    - UCE embeddings (1280-dim) require a UCE index")
+        print(f"    - SCimilarity embeddings (128-dim) require a SCimilarity index")
+        sys.exit(1)
+
+    # 6b. Validate FAISS index size matches reference annotations
+    if index.ntotal != len(ref_df):
+        print(f"Error: FAISS index has {index.ntotal} vectors but reference annotations has {len(ref_df)} rows.")
+        print(f"  The index and reference annotations must have the same number of entries.")
+        sys.exit(1)
+
     # 7. Query FAISS
     print(f"Querying FAISS index (k={args.k})...")
-    dists, neighbor_indices = execute_query(index, embeddings, k=args.k)
+    squared_dists, neighbor_indices = execute_query(index, embeddings, k=args.k)
+    # FAISS L2 indices return squared Euclidean distances; convert to true Euclidean
+    dists = np.sqrt(np.maximum(squared_dists, 0))
     print(f"  Query complete for {n_cells} cells")
 
     # 8. Majority vote
@@ -133,14 +170,17 @@ def main():
         neighbor_distances_list.append(",".join(f"{d:.4f}" for d in sorted_dists))
         neighbor_names_list.append(",".join(sorted_names))
 
-    # Compute mean euclidean distance across all k neighbors
+    # Compute mean and std of euclidean distance across all k neighbors
     mean_euclidean_distances = []
+    std_euclidean_distances = []
     for row_dists in dists:
         valid_dists = row_dists[np.isfinite(row_dists)]
         if len(valid_dists) > 0:
             mean_euclidean_distances.append(float(np.mean(valid_dists)))
+            std_euclidean_distances.append(float(np.std(valid_dists)))
         else:
             mean_euclidean_distances.append(float('nan'))
+            std_euclidean_distances.append(float('nan'))
 
     # 11. Build output DataFrame
     predictions_df = pd.DataFrame({
@@ -148,24 +188,41 @@ def main():
         'predicted_cell_type': predicted_names,
         'vote_percentage': vote_percentages,
         'mean_euclidean_distance': mean_euclidean_distances,
+        'std_euclidean_distance': std_euclidean_distances,
         'neighbor_distances': neighbor_distances_list,
         'neighbor_cell_types': neighbor_names_list,
     })
 
     # If metadata was provided, prepend all metadata columns to output
     if metadata_df is not None:
-        # Concatenate metadata + predictions side-by-side (same row order)
         output_df = pd.concat([metadata_df.reset_index(drop=True),
                                predictions_df.reset_index(drop=True)],
                               axis=1)
     else:
         output_df = predictions_df
 
-    # Save
+    # Ensure cell_id is the first column (generate if not present from metadata)
+    if 'cell_id' not in output_df.columns:
+        output_df.insert(0, 'cell_id', [f"row_{i}" for i in range(n_cells)])
+    elif output_df.columns.tolist().index('cell_id') != 0:
+        col = output_df.pop('cell_id')
+        output_df.insert(0, 'cell_id', col)
+
+    # Save with comment header describing the run
     output_dir = os.path.dirname(args.output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    output_df.to_csv(args.output, sep='\t', index=False)
+    with open(args.output, 'w') as f:
+        f.write(f"# Reference annotations: {args.ref_annot} ({len(ref_df)} cells)\n")
+        f.write(f"# Query embeddings: {args.embeddings} ({n_cells} cells, {embedding_dim}d)\n")
+        f.write(f"# FAISS index: {args.index} ({index.ntotal} vectors, {index.d}d)\n")
+        f.write(f"# OBO file: {args.obo} ({len(cl_names)} terms)\n")
+        f.write(f"# k: {args.k}\n")
+        f.write(f"# Prediction method: majority voting\n")
+        f.write(obsolete_comment)
+        if args.metadata:
+            f.write(f"# Query metadata: {args.metadata}\n")
+        output_df.to_csv(f, sep='\t', index=False)
     print(f"\nSaved predictions for {n_cells} cells to {args.output}")
 
     # Summary

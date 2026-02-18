@@ -94,8 +94,8 @@ def calculate_ontology_statistics(df: pd.DataFrame, ontology_method: str = 'ic')
         'mean': float(valid_distances.mean()),
         'median': float(valid_distances.median()),
         'std': float(valid_distances.std()),
-        'min': int(valid_distances.min()),
-        'max': int(valid_distances.max()),
+        'min': float(valid_distances.min()),
+        'max': float(valid_distances.max()),
         'percentiles': {
             '25th': float(valid_distances.quantile(0.25)),
             '75th': float(valid_distances.quantile(0.75)),
@@ -110,7 +110,7 @@ def calculate_ontology_statistics(df: pd.DataFrame, ontology_method: str = 'ic')
 
 def analyze_distance_metric_relationship(df: pd.DataFrame, output_dir: str, ontology_method: str = 'ic'):
     """
-    Analyze the relationship between ontology score and accuracy metrics.
+    Analyze the relationship between ontology score and exact match.
 
     Args:
         df: DataFrame with per-cell results
@@ -130,7 +130,7 @@ def analyze_distance_metric_relationship(df: pd.DataFrame, output_dir: str, onto
         print("No valid ontology scores found for relationship analysis.")
         return
 
-    # Calculate per-cell accuracy (exact match)
+    # Calculate per-cell exact match
     valid_df['is_correct'] = (valid_df['true_label'] == valid_df['prediction_label']).astype(int)
 
     # Group by score and calculate metrics
@@ -139,50 +139,59 @@ def analyze_distance_metric_relationship(df: pd.DataFrame, output_dir: str, onto
     }).reset_index()
     distance_groups.columns = [col, 'cell_count', 'correct_count', 'accuracy']
 
-    # Save relationship CSV
-    relationship_path = output_dir / "ontology_distance_accuracy_relationship.csv"
-    distance_groups.to_csv(relationship_path, index=False)
-    print(f"\nSaved ontology-accuracy relationship to {relationship_path}")
-
     # Labels
     if is_similarity:
         x_label = 'Ontology Similarity (Lin/IC)'
-        title_scatter = 'Accuracy vs Ontology IC Similarity'
+        title_scatter = 'Exact Match vs Ontology IC Similarity'
         title_hist = 'Distribution of Ontology IC Similarities'
     else:
-        x_label = 'Ontology Tree Distance'
-        title_scatter = 'Accuracy vs Ontology Distance'
+        x_label = 'Ontology Shortest Distance'
+        title_scatter = 'Exact Match vs Ontology Distance'
         title_hist = 'Distribution of Ontology Distances'
 
     # Create visualization
     plt.figure(figsize=(12, 6))
 
-    # Plot 1: Accuracy vs Score
-    plt.subplot(1, 2, 1)
-    plt.scatter(distance_groups[col], distance_groups['accuracy'],
-                s=distance_groups['cell_count']*2, alpha=0.6)
+    # Plot 1: Exact match vs Score
+    ax1 = plt.subplot(1, 2, 1)
+    counts = distance_groups['cell_count']
+    count_min, count_max = counts.min(), counts.max()
+    min_size, max_size = 20, 500
+    if count_max > count_min:
+        sizes = min_size + (counts - count_min) / (count_max - count_min) * (max_size - min_size)
+    else:
+        sizes = (min_size + max_size) / 2
+    scatter = ax1.scatter(distance_groups[col], distance_groups['accuracy'],
+                          s=sizes, alpha=0.6)
+    # Size legend
+    legend_counts = [int(count_min), int((count_min + count_max) / 2), int(count_max)]
+    legend_sizes = [min_size + (c - count_min) / max(count_max - count_min, 1) * (max_size - min_size) for c in legend_counts]
+    for c, sz in zip(legend_counts, legend_sizes):
+        ax1.scatter([], [], s=sz, alpha=0.6, color='C0', label=f'{c:,} cells')
+    ax1.legend(title='Cell count', loc='best', framealpha=0.7)
     plt.xlabel(x_label)
-    plt.ylabel('Accuracy (Exact Match)')
+    plt.ylabel('Exact Match')
     plt.title(title_scatter)
     plt.grid(True, alpha=0.3)
 
     # Plot 2: Distribution
     plt.subplot(1, 2, 2)
     max_val = valid_df[col].max()
-    n_bins = int(min(50, max_val + 1)) if max_val > 0 else 50
-    plt.hist(valid_df[col], bins=n_bins, edgecolor='black', alpha=0.7)
+    #n_bins = int(min(50, max_val + 1)) if max_val > 0 else 50
+    plt.hist(valid_df[col], edgecolor='black', alpha=0.7)
     plt.xlabel(x_label)
     plt.ylabel('Number of Cells')
     plt.title(title_hist)
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plot_path = output_dir / "ontology_distance_analysis.png"
+    plot_filename = "ontology_similarity_analysis.png" if is_similarity else "ontology_distance_analysis.png"
+    plot_path = output_dir / plot_filename
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"Saved visualization to {plot_path}")
     plt.close()
 
-def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ontology_method: str = 'ic'):
+def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ontology_method: str = 'ic', comment_header: str = None):
     """
     Generate a comprehensive summary report.
 
@@ -191,6 +200,7 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
         stats: Statistics dictionary from calculate_ontology_statistics
         output_path: Path to save the report
         ontology_method: 'ic' or 'shortest_path'
+        comment_header: Optional metadata header to prepend to the report
     """
     output_path = Path(output_path)
     col = stats.get('column', _detect_ontology_column(df, ontology_method))
@@ -203,6 +213,9 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
     value_label = "Similarity" if is_similarity else "Distance"
 
     with open(output_path, 'w') as f:
+        if comment_header:
+            f.write(comment_header)
+            f.write("\n")
         f.write("=" * 80 + "\n")
         f.write(f"{report_title}\n")
         f.write("=" * 80 + "\n\n")
@@ -266,8 +279,8 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
             f.write(f"Mean {metric_noun}: {stats['mean']:.4f}\n")
             f.write(f"Median {metric_noun}: {stats['median']:.4f}\n")
             f.write(f"Standard deviation: {stats['std']:.4f}\n")
-            f.write(f"Minimum {metric_noun}: {stats['min']}\n")
-            f.write(f"Maximum {metric_noun}: {stats['max']}\n\n")
+            f.write(f"Minimum {metric_noun}: {stats['min']:.4f}\n")
+            f.write(f"Maximum {metric_noun}: {stats['max']:.4f}\n\n")
 
             f.write("PERCENTILES\n")
             f.write("-" * 80 + "\n")

@@ -12,48 +12,57 @@ logger = logging.getLogger(__name__)
 def load_faiss_index(path: str, index_type: str = 'ivfFlat') -> faiss.Index:
     """
     Securely load the FAISS index file.
-    
+
     Args:
         path (str): Path to the FAISS index file.
-        index_type (str): Type of index (e.g., 'ivfFlat', 'ivfPQ'). 
-                          Currently primarily handled by faiss.read_index, 
+        index_type (str): Type of index (e.g., 'ivfFlat', 'ivfPQ').
+                          Currently primarily handled by faiss.read_index,
                           but kept as an arg for future flexibility or validation.
-                          
+
     Returns:
         faiss.Index: Loaded FAISS index.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"FAISS index file not found at: {path}")
-    
+
     try:
         index = faiss.read_index(path)
-        return index
-    except Exception as e:
+    except (IOError, OSError) as e:
         raise RuntimeError(f"Failed to load FAISS index: {e}")
+
+    # IVF indices default to nprobe=1 (searches only 1 Voronoi cell),
+    # which causes missing neighbors and inf distances in sparse cells.
+    ivf = faiss.extract_index_ivf(index)
+    if ivf is not None:
+        ivf.nprobe = 20
+        print(f"  IVF index: searching {ivf.nprobe} of {ivf.nlist} cells (nprobe)")
+
+    return index
 
 def load_reference_annotations(path: str) -> pd.DataFrame:
     """
     Load the specific prediction_obs.tsv file.
-    
+
     Args:
         path (str): Path to the prediction_obs.tsv file.
-        
+
     Returns:
         pd.DataFrame: DataFrame containing reference annotations.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the required column is missing.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Reference annotations file not found at: {path}")
-        
-    try:
-        df = pd.read_csv(path, sep='\t')
-        
-        required_columns = ['cell_type_ontology_term_id']
-        if not all(col in df.columns for col in required_columns):
-            raise ValueError(f"Annotation file must contain column: {required_columns[0]}")
-            
-        return df
-    except Exception as e:
-        raise RuntimeError(f"Failed to load reference annotations: {e}")
+
+    df = pd.read_csv(path, sep='\t')
+
+    required_columns = ['cell_type_ontology_term_id']
+    if not all(col in df.columns for col in required_columns):
+        raise ValueError(f"Annotation file must contain column: {required_columns[0]}")
+
+    return df
 
 def load_test_batch(test_dir: str) -> List[Dict[str, str]]:
     """

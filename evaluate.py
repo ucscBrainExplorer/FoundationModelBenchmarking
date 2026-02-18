@@ -28,7 +28,7 @@ from analyze_ontology_results import (
     generate_summary_report,
     analyze_distance_metric_relationship,
 )
-from obo_parser import parse_obo_names
+from obo_parser import parse_obo_names, parse_obo_replacements
 
 
 def build_parser():
@@ -62,9 +62,16 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Read predictions
+    # 1. Read predictions (and extract any comment header for provenance)
     print(f"Loading predictions from {args.predictions}...")
-    pred_df = pd.read_csv(args.predictions, sep='\t')
+    prediction_provenance = []
+    with open(args.predictions, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                prediction_provenance.append(line.rstrip('\n'))
+            else:
+                break
+    pred_df = pd.read_csv(args.predictions, sep='\t', comment='#')
     if args.pred_id_col not in pred_df.columns:
         print(f"Error: column '{args.pred_id_col}' not found in predictions file.")
         print(f"  Available columns: {list(pred_df.columns)}")
@@ -99,6 +106,29 @@ def main():
     predictions = pred_df[args.pred_id_col].tolist()
     ground_truth = truth_df[args.truth_id_col].tolist()
 
+    # 3a. Resolve obsolete CL terms in predictions and ground truth
+    cl_replacements = parse_obo_replacements(args.obo)
+    print(f"  Found {len(cl_replacements)} obsolete terms with replacements")
+    cl_names = parse_obo_names(args.obo)
+    n_pred_replaced = 0
+    n_truth_replaced = 0
+    for i, p in enumerate(predictions):
+        if p in cl_replacements:
+            predictions[i] = cl_replacements[p]
+            n_pred_replaced += 1
+    for i, t in enumerate(ground_truth):
+        if t in cl_replacements:
+            ground_truth[i] = cl_replacements[t]
+            n_truth_replaced += 1
+    # Count obsolete terms with no replacement
+    all_terms = set(predictions) | set(ground_truth)
+    n_unresolvable = len(all_terms - set(cl_names) - set(cl_replacements))
+    if n_pred_replaced > 0 or n_truth_replaced > 0:
+        print(f"  Resolved {n_pred_replaced} obsolete prediction terms and {n_truth_replaced} obsolete ground truth terms to current terms")
+    if n_unresolvable > 0:
+        print(f"  {n_unresolvable} obsolete terms have no replacement and will remain as-is")
+    obsolete_comment = f"# Obsolete terms resolved: {n_pred_replaced} predictions replaced, {n_truth_replaced} ground truth replaced, {n_unresolvable} unresolvable"
+
     # Generate cell indices for output (since no cell_id column)
     cell_ids = [f"row_{i}" for i in range(len(predictions))]
 
@@ -120,10 +150,7 @@ def main():
         method=args.ontology_method, ic_values=ic_values
     )
 
-    # 6. Parse OBO for readable names
-    cl_names = parse_obo_names(args.obo)
-
-    # 7. Compute exact match rate
+    # 6. Compute exact match rate (cl_names already parsed in step 3a)
     is_exact_match = [1 if p == t else 0 for p, t in zip(predictions, ground_truth)]
     exact_match_rate = sum(is_exact_match) / len(is_exact_match)
 
@@ -148,13 +175,26 @@ def main():
         'prediction_label': predictions,
     })
 
+    # Build comment header for output files
+    comment_lines = []
+    comment_lines.append(f"# Ontology method: {args.ontology_method}")
+    comment_lines.append(f"# Predictions file: {args.predictions}")
+    comment_lines.append(f"# Ground truth file: {args.ground_truth}")
+    comment_lines.append(f"# OBO file: {args.obo}")
+    comment_lines.append(obsolete_comment)
+    if prediction_provenance:
+        comment_lines.append("# --- Prediction provenance (from predictions file) ---")
+        comment_lines.extend(prediction_provenance)
+    comment_header = '\n'.join(comment_lines) + '\n'
+
     # Save per-cell results (without the internal alias columns)
     per_cell_output = per_cell_df[['cell_id', 'predicted_cl_term_id', 'truth_cl_term_id',
                                     'predicted_cell_type', 'truth_cell_type',
                                     onto_col, 'is_exact_match']].copy()
-    per_cell_output.rename(columns={onto_col: 'ontology_score'}, inplace=True)
     per_cell_path = os.path.join(output_dir, "per_cell_evaluation.tsv")
-    per_cell_output.to_csv(per_cell_path, sep='\t', index=False)
+    with open(per_cell_path, 'w') as f:
+        f.write(comment_header)
+        per_cell_output.to_csv(f, sep='\t', index=False, na_rep='NaN')
     print(f"  Saved per-cell evaluation to {per_cell_path}")
 
     # 9. Compute aggregate statistics using analyze_ontology_results
@@ -180,13 +220,16 @@ def main():
     }
     summary_df = pd.DataFrame(summary_data)
     summary_path = os.path.join(output_dir, "evaluation_summary.tsv")
-    summary_df.to_csv(summary_path, sep='\t', index=False)
+    with open(summary_path, 'w') as f:
+        f.write(comment_header)
+        summary_df.to_csv(f, sep='\t', index=False, na_rep='NaN')
     print(f"  Saved evaluation summary to {summary_path}")
 
     # 10. Generate report and plots
     report_path = os.path.join(output_dir, "ontology_analysis_report.txt")
     generate_summary_report(per_cell_df, stats, report_path,
-                            ontology_method=args.ontology_method)
+                            ontology_method=args.ontology_method,
+                            comment_header=comment_header)
 
     analyze_distance_metric_relationship(per_cell_df, output_dir,
                                          ontology_method=args.ontology_method)
