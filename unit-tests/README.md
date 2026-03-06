@@ -58,7 +58,6 @@ python3 -m unittest unit-tests.test_data_loader.TestLoadFaissIndex.test_load_val
 - `load_faiss_index()`: Loading indices, handling missing/invalid files
 - `load_reference_annotations()`: Loading TSV files, validating required columns
 - `load_test_batch()`: Discovering test datasets, pairing embeddings with metadata
-- `download_data_from_s3()`: S3 download error handling
 
 ### test_prediction_module.py
 - `execute_query()`: FAISS querying with euclidean/cosine metrics, type conversion
@@ -93,11 +92,9 @@ All tests require the same dependencies as the main project:
 - scikit-learn
 - networkx
 - pronto
-- boto3 (for S3 tests)
 
 ## Notes
 
 - Tests use mock data to avoid dependencies on external data sources
-- S3 download tests expect failures without valid AWS credentials (this is intentional)
 - All tests are self-contained and can run in any order
 - Tests automatically clean up generated files (e.g., benchmark_results.csv)

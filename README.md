@@ -143,7 +143,7 @@ FoundationModelBenchmarking/
 ├── annotate_cl_terms.py           # NEW: Standalone annotation
 ├── obo_parser.py                  # NEW: OBO file parsing
 │
-├── data_loader.py                 # Data ingestion, S3 download/upload
+├── data_loader.py                 # Data ingestion
 ├── prediction_module.py           # KNN search and voting logic
 ├── ontology_utils.py              # Cell Ontology: IC similarity + path distance
 ├── analyze_ontology_results.py    # Statistical analysis and reporting

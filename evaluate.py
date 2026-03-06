@@ -29,6 +29,301 @@ from analyze_ontology_results import (
     analyze_distance_metric_relationship,
 )
 from obo_parser import parse_obo_names, parse_obo_replacements
+from annotate_cl_terms import parse_obo_synonyms, fuzzy_normalize
+
+
+import re
+
+
+def _is_cl_id(value):
+    """Check if a string looks like a CL term ID (e.g. CL:0000540)."""
+    return bool(re.match(r'^CL:\d+$', str(value).strip()))
+
+
+def _score_column_cl(col_values):
+    """Score how likely a column contains CL term IDs (0.0 to 1.0)."""
+    sample = [v for v in col_values if pd.notna(v) and str(v).strip()][:200]
+    if not sample:
+        return 0.0
+    return sum(1 for v in sample if _is_cl_id(v)) / len(sample)
+
+
+def _score_column_names(col_values, name_to_id):
+    """Score how likely a column contains resolvable cell type names (0.0 to 1.0)."""
+    sample = [v for v in col_values if pd.notna(v) and str(v).strip()][:200]
+    if not sample:
+        return 0.0
+    return sum(1 for v in sample if str(v).lower().strip() in name_to_id) / len(sample)
+
+
+def auto_detect_column(df, obo_path, role="cell type", user_col=None):
+    """Auto-detect which column contains CL term IDs or resolvable cell type names.
+
+    Strategy:
+      1. If user specified a column and it exists, use it.
+      2. Scan all columns: prefer one with CL IDs (>90% match).
+      3. Fall back to column with highest resolvable name fraction (>50%).
+      4. If nothing found, error out with available columns.
+
+    Args:
+        df: DataFrame to search.
+        obo_path: Path to OBO file (for name resolution lookups).
+        role: Human-readable role string for messages (e.g. "predictions").
+        user_col: User-specified column name, or None for auto-detect.
+
+    Returns:
+        Tuple of (column_name, detection_report).
+    """
+    # If user specified and it exists, use it
+    if user_col and user_col in df.columns:
+        return user_col, f"  Using column '{user_col}' (user-specified)"
+
+    # Build name lookup for scoring
+    cl_names = parse_obo_names(obo_path)
+    name_to_id = {name.lower(): cl_id for cl_id, name in cl_names.items()}
+
+    # Score every column
+    best_cl_col = None
+    best_cl_score = 0.0
+    best_name_col = None
+    best_name_score = 0.0
+
+    for col in df.columns:
+        vals = df[col].tolist()
+
+        cl_score = _score_column_cl(vals)
+        if cl_score > best_cl_score:
+            best_cl_score = cl_score
+            best_cl_col = col
+
+        name_score = _score_column_names(vals, name_to_id)
+        if name_score > best_name_score:
+            best_name_score = name_score
+            best_name_col = col
+
+    # Prefer CL ID columns
+    if best_cl_score > 0.9:
+        return best_cl_col, (
+            f"  Auto-detected column '{best_cl_col}' for {role}"
+            f" ({best_cl_score:.0%} CL term IDs)")
+
+    # Fall back to name columns
+    if best_name_score > 0.5:
+        return best_name_col, (
+            f"  Auto-detected column '{best_name_col}' for {role}"
+            f" ({best_name_score:.0%} resolvable cell type names)")
+
+    # Nothing found
+    if user_col:
+        msg = f"  Column '{user_col}' not found."
+    else:
+        msg = f"  No column with CL term IDs or resolvable cell type names found."
+    msg += f"\n  Available columns: {list(df.columns)}"
+    return None, msg
+
+
+def build_label_mapping(obo_path, cl_names=None):
+    """Build lookup tables for resolving cell type names to CL term IDs.
+
+    Constructs exact, synonym, and fuzzy-normalized lookup dicts from an OBO
+    file. These tables power the name-to-CL-ID resolution cascade used by
+    both evaluate.py and generate_remap.py.
+
+    Args:
+        obo_path: Path to OBO file.
+        cl_names: Optional pre-parsed {CL_id: name} dict. Parsed from OBO if None.
+
+    Returns:
+        Tuple of (cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id).
+    """
+    if cl_names is None:
+        cl_names = parse_obo_names(obo_path)
+    name_to_id = {name.lower(): cl_id for cl_id, name in cl_names.items()}
+    synonym_to_id = parse_obo_synonyms(obo_path)
+    fuzzy_name_to_id = {fuzzy_normalize(name): cl_id
+                        for cl_id, name in cl_names.items()}
+    fuzzy_synonym_to_id = {fuzzy_normalize(syn): cl_id
+                           for syn, cl_id in synonym_to_id.items()}
+    return cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id
+
+
+def resolve_name(name, name_to_id, synonym_to_id, fuzzy_name_to_id,
+                 fuzzy_synonym_to_id, cl_names):
+    """Resolve a single cell type name to a CL term ID.
+
+    Tries exact name match, synonym match, then fuzzy match.
+
+    Args:
+        name: Cell type name string.
+        name_to_id: {lowercase_name: CL_id} dict.
+        synonym_to_id: {lowercase_synonym: CL_id} dict.
+        fuzzy_name_to_id: {fuzzy_name: CL_id} dict.
+        fuzzy_synonym_to_id: {fuzzy_synonym: CL_id} dict.
+        cl_names: {CL_id: canonical_name} dict.
+
+    Returns:
+        Tuple of (cl_id_or_None, canonical_name, method) where method is one of
+        'exact', 'synonym', 'fuzzy', 'fuzzy_synonym', or None if unresolved.
+    """
+    name_lower = name.lower().strip()
+
+    if name_lower in name_to_id:
+        cl_id = name_to_id[name_lower]
+        return cl_id, cl_names.get(cl_id, ''), 'exact'
+
+    if name_lower in synonym_to_id:
+        cl_id = synonym_to_id[name_lower]
+        return cl_id, cl_names.get(cl_id, ''), 'synonym'
+
+    fuzzy = fuzzy_normalize(name)
+    if fuzzy in fuzzy_name_to_id:
+        cl_id = fuzzy_name_to_id[fuzzy]
+        return cl_id, cl_names.get(cl_id, ''), 'fuzzy'
+    if fuzzy in fuzzy_synonym_to_id:
+        cl_id = fuzzy_synonym_to_id[fuzzy]
+        return cl_id, cl_names.get(cl_id, ''), 'fuzzy_synonym'
+
+    return None, '', None
+
+
+def resolve_to_cl_ids(values, obo_path, cl_names=None):
+    """Auto-resolve a list of values to CL term IDs.
+
+    If values already look like CL IDs, return them unchanged.
+    Otherwise, resolve readable names to CL IDs using exact name match,
+    synonym match, and fuzzy match from the OBO file.
+
+    Args:
+        values: List of strings (CL IDs or readable cell type names).
+        obo_path: Path to OBO file.
+        cl_names: Optional pre-parsed {CL_id: name} dict.
+
+    Returns:
+        Tuple of (resolved_list, was_resolved, resolution_report, unresolved_names):
+            resolved_list: List of CL IDs (or original value if unresolved).
+            was_resolved: True if name-to-ID resolution was performed.
+            resolution_report: String describing what happened.
+            unresolved_names: List of names that could not be resolved.
+    """
+    # Check if values are already CL IDs by sampling non-null values
+    sample = [v for v in values if pd.notna(v) and str(v).strip()][:100]
+    cl_id_frac = sum(1 for v in sample if _is_cl_id(v)) / max(len(sample), 1)
+
+    if cl_id_frac > 0.9:
+        return values, False, "Values are CL term IDs — no resolution needed.", []
+
+    # Build lookup tables
+    cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id = \
+        build_label_mapping(obo_path, cl_names)
+
+    # Resolve unique names first, then apply to full list
+    unique_names = set(str(v).strip() for v in values if pd.notna(v))
+    mapping = {}  # {original_name: CL_id or original_name}
+    resolved_as = {}  # {original_name: (CL_id, canonical_name, method)}
+    method_counts = {'exact': 0, 'synonym': 0, 'fuzzy': 0, 'already_cl': 0,
+                     'unresolved': 0}
+
+    for name in unique_names:
+        if _is_cl_id(name):
+            mapping[name] = name
+            method_counts['already_cl'] += 1
+            continue
+
+        cl_id, canon_name, method = resolve_name(
+            name, name_to_id, synonym_to_id,
+            fuzzy_name_to_id, fuzzy_synonym_to_id, cl_names)
+
+        if cl_id is not None:
+            mapping[name] = cl_id
+            resolved_as[name] = (cl_id, canon_name, method)
+            if method in ('fuzzy', 'fuzzy_synonym'):
+                method_counts['fuzzy'] += 1
+            else:
+                method_counts[method] += 1
+        else:
+            mapping[name] = name  # keep original
+            method_counts['unresolved'] += 1
+
+    resolved = [mapping.get(str(v).strip(), v) for v in values]
+
+    # Count how many cells are affected by unresolved names
+    unresolved_names = sorted(n for n, m_id in mapping.items()
+                              if not _is_cl_id(m_id))
+    unresolved_cell_count = sum(
+        1 for v in values
+        if str(v).strip() in unresolved_names
+    )
+
+    lines = [f"Auto-resolving readable names to CL term IDs..."]
+    lines.append(f"    {len(unique_names)} unique names")
+    lines.append(f"    Exact name match: {method_counts['exact']}")
+    if method_counts['synonym']:
+        lines.append(f"    Synonym match:    {method_counts['synonym']}")
+    if method_counts['fuzzy']:
+        lines.append(f"    Fuzzy match:      {method_counts['fuzzy']}")
+    if method_counts['already_cl']:
+        lines.append(f"    Already CL IDs:   {method_counts['already_cl']}")
+    if method_counts['unresolved']:
+        lines.append(f"    WARNING — UNRESOLVED: {method_counts['unresolved']} names"
+                     f" ({unresolved_cell_count} cells will get NaN scores)")
+        for n in unresolved_names:
+            lines.append(f"      - \"{n}\"")
+    report = '\n'.join(lines)
+
+    return resolved, True, report, unresolved_names
+
+
+def load_remap_file(path):
+    """Load a remap TSV (from generate_remap.py) into a lookup dict.
+
+    Args:
+        path: Path to remap TSV with columns original_label, cl_term_id, ...
+
+    Returns:
+        Dict {original_label: cl_term_id} (entries with empty cl_term_id are skipped).
+    """
+    df = pd.read_csv(path, sep='\t', comment='#')
+    remap = {}
+    for _, row in df.iterrows():
+        label = str(row['original_label']).strip()
+        cl_id = str(row.get('cl_term_id', '')).strip()
+        if cl_id and cl_id != 'nan' and _is_cl_id(cl_id):
+            remap[label] = cl_id
+    return remap
+
+
+def apply_remap(values, remap_dict, cl_names=None):
+    """Replace ground truth values using a remap dictionary.
+
+    Args:
+        values: List of ground truth strings (names or CL IDs).
+        remap_dict: {original_label: cl_term_id} dict from load_remap_file.
+        cl_names: Optional {CL_id: name} dict for reporting.
+
+    Returns:
+        Tuple of (remapped_values, n_remapped, remap_report).
+    """
+    remapped = []
+    n_remapped = 0
+    for v in values:
+        v_str = str(v).strip()
+        if v_str in remap_dict:
+            remapped.append(remap_dict[v_str])
+            n_remapped += 1
+        else:
+            remapped.append(v)
+
+    lines = [f"Applied remap: {n_remapped}/{len(values)} cells remapped"]
+    unique_remapped = set()
+    for v in values:
+        v_str = str(v).strip()
+        if v_str in remap_dict and v_str not in unique_remapped:
+            unique_remapped.add(v_str)
+            target = remap_dict[v_str]
+            target_name = cl_names.get(target, '') if cl_names else ''
+            lines.append(f"    {v_str} -> {target} ({target_name})")
+
+    return remapped, n_remapped, '\n'.join(lines)
 
 
 def build_parser():
@@ -52,6 +347,8 @@ def build_parser():
                         help="CL term ID column in ground truth file (default: cell_type_ontology_term_id)")
     parser.add_argument("--output-dir", type=str, default="evaluation_results",
                         help="Output directory (default: evaluation_results/)")
+    parser.add_argument("--remap-file", type=str, default=None,
+                        help="Remap TSV (from generate_remap.py) to replace ground truth labels before evaluation")
     return parser
 
 
@@ -72,20 +369,28 @@ def main():
             else:
                 break
     pred_df = pd.read_csv(args.predictions, sep='\t', comment='#')
-    if args.pred_id_col not in pred_df.columns:
-        print(f"Error: column '{args.pred_id_col}' not found in predictions file.")
-        print(f"  Available columns: {list(pred_df.columns)}")
-        sys.exit(1)
     print(f"  Loaded {len(pred_df)} predictions")
+
+    # Auto-detect prediction column
+    pred_col, pred_col_report = auto_detect_column(
+        pred_df, args.obo, role="predictions", user_col=args.pred_id_col)
+    if pred_col is None:
+        print(f"Error: {pred_col_report}")
+        sys.exit(1)
+    print(pred_col_report)
 
     # 2. Read ground truth
     print(f"Loading ground truth from {args.ground_truth}...")
     truth_df = pd.read_csv(args.ground_truth, sep='\t')
-    if args.truth_id_col not in truth_df.columns:
-        print(f"Error: column '{args.truth_id_col}' not found in ground truth file.")
-        print(f"  Available columns: {list(truth_df.columns)}")
-        sys.exit(1)
     print(f"  Loaded {len(truth_df)} ground truth entries")
+
+    # Auto-detect ground truth column
+    truth_col, truth_col_report = auto_detect_column(
+        truth_df, args.obo, role="ground truth", user_col=args.truth_id_col)
+    if truth_col is None:
+        print(f"Error: {truth_col_report}")
+        sys.exit(1)
+    print(truth_col_report)
 
     # 3. Match by row index - validate same row count
     print(f"\nMatching predictions to ground truth by row index...")
@@ -103,10 +408,30 @@ def main():
     print(f"  Matching row 0 → row 0, row 1 → row 1, etc.\n")
 
     # Extract columns by row index (already aligned)
-    predictions = pred_df[args.pred_id_col].tolist()
-    ground_truth = truth_df[args.truth_id_col].tolist()
+    predictions = pred_df[pred_col].tolist()
+    ground_truth = truth_df[truth_col].tolist()
 
-    # 3a. Resolve obsolete CL terms in predictions and ground truth
+    # 3a-pre. Apply remap file to ground truth if provided
+    remap_comment = ""
+    if args.remap_file:
+        print(f"\n  Loading remap file: {args.remap_file}")
+        remap_dict = load_remap_file(args.remap_file)
+        cl_names_for_remap = parse_obo_names(args.obo)
+        ground_truth, n_remapped, remap_report = apply_remap(
+            ground_truth, remap_dict, cl_names_for_remap)
+        print(f"  {remap_report}")
+        remap_comment = f"# Remap file: {args.remap_file} ({n_remapped} cells remapped)"
+
+    # 3a. Auto-resolve readable names to CL term IDs if needed
+    predictions, pred_resolved, pred_report, pred_unresolved = resolve_to_cl_ids(
+        predictions, args.obo)
+    print(f"  Predictions: {pred_report}")
+
+    ground_truth, truth_resolved, truth_report, truth_unresolved = resolve_to_cl_ids(
+        ground_truth, args.obo)
+    print(f"  Ground truth: {truth_report}")
+
+    # 3b. Resolve obsolete CL terms in predictions and ground truth
     cl_replacements = parse_obo_replacements(args.obo)
     print(f"  Found {len(cl_replacements)} obsolete terms with replacements")
     cl_names = parse_obo_names(args.obo)
@@ -181,7 +506,13 @@ def main():
     comment_lines.append(f"# Predictions file: {args.predictions}")
     comment_lines.append(f"# Ground truth file: {args.ground_truth}")
     comment_lines.append(f"# OBO file: {args.obo}")
+    if pred_resolved:
+        comment_lines.append(f"# Predictions: readable names auto-resolved to CL term IDs (column: {pred_col})")
+    if truth_resolved:
+        comment_lines.append(f"# Ground truth: readable names auto-resolved to CL term IDs (column: {truth_col})")
     comment_lines.append(obsolete_comment)
+    if remap_comment:
+        comment_lines.append(remap_comment)
     if prediction_provenance:
         comment_lines.append("# --- Prediction provenance (from predictions file) ---")
         comment_lines.extend(prediction_provenance)
@@ -234,6 +565,26 @@ def main():
     analyze_distance_metric_relationship(per_cell_df, output_dir,
                                          ontology_method=args.ontology_method)
 
+    # Save unresolved names if any
+    all_unresolved = sorted(set(pred_unresolved + truth_unresolved))
+    if all_unresolved:
+        unresolved_path = os.path.join(output_dir, "unresolved_names.txt")
+        with open(unresolved_path, 'w') as f:
+            f.write("# Cell type names that could not be resolved to CL term IDs.\n")
+            f.write("# These cells will have NaN ontology scores.\n")
+            f.write(f"# OBO file: {args.obo}\n")
+            f.write("#\n")
+            if pred_unresolved:
+                f.write("# From predictions:\n")
+                for n in sorted(pred_unresolved):
+                    f.write(f"{n}\n")
+            if truth_unresolved:
+                f.write("# From ground truth:\n")
+                for n in sorted(truth_unresolved):
+                    f.write(f"{n}\n")
+        print(f"\n  WARNING: {len(all_unresolved)} names could not be resolved to CL terms.")
+        print(f"  Saved to {unresolved_path}")
+
     # Print summary to console
     is_similarity = (args.ontology_method == 'ic')
     metric_noun = "similarity" if is_similarity else "distance"
@@ -241,11 +592,11 @@ def main():
     print("EVALUATION SUMMARY")
     print(f"{'=' * 60}")
     print(f"Cells evaluated: {len(predictions)}")
-    print(f"Exact CL term match rate: {exact_match_rate:.4f}")
+    print(f"Exact CL term match rate: {exact_match_rate:.2f}")
     valid_scores = [s for s in per_cell_scores if not (s != s)]  # filter NaN
     if valid_scores:
-        print(f"Mean ontology {metric_noun}: {stats['mean']:.4f}")
-        print(f"Median ontology {metric_noun}: {stats['median']:.4f}")
+        print(f"Mean ontology {metric_noun}: {stats['mean']:.2f}")
+        print(f"Median ontology {metric_noun}: {stats['median']:.2f}")
     else:
         print(f"No valid ontology {metric_noun} scores computed")
     print(f"{'=' * 60}")

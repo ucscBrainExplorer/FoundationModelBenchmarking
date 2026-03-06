@@ -15,28 +15,127 @@ except ImportError:
     pronto = None
 
 
-def load_ontology(obo_path: str) -> 'nx.DiGraph':
+def load_ontology(obo_path: str, include_relationships: bool = True) -> 'nx.DiGraph':
     """
     Load the Cell Ontology (CL) OBO file into a NetworkX DiGraph.
 
+    Tries pronto first for parsing; falls back to a manual OBO parser when
+    pronto fails (e.g. on the full cl.obo which references external ontologies
+    like BFO that pronto cannot resolve).
+
     Args:
         obo_path (str): Path to the .obo file.
+        include_relationships (bool): If True, also add edges for
+            ``relationship:`` lines (e.g. develops_from, part_of) between
+            CL terms, not just ``is_a`` edges.  Default False.
 
     Returns:
-        nx.DiGraph: Directed graph representing the ontology (edges point to parents/superclasses).
+        nx.DiGraph: Directed graph representing the ontology (edges point
+            to parents/superclasses).  Only non-obsolete CL: terms are
+            included.
     """
-    if pronto is None or nx is None:
-        raise ImportError("pronto and networkx are required for ontology_utils.")
+    if nx is None:
+        raise ImportError("networkx is required for ontology_utils.")
 
-    ont = pronto.Ontology(obo_path)
     g = nx.DiGraph()
 
-    for term in ont.terms():
-        g.add_node(term.id, name=term.name)
-        for superclass in term.superclasses(distance=1, with_self=False):
-            g.add_edge(term.id, superclass.id)
+    # Try pronto first (works for cl-basic.obo)
+    pronto_ok = False
+    if pronto is not None:
+        try:
+            ont = pronto.Ontology(obo_path)
+            for term in ont.terms():
+                g.add_node(term.id, name=term.name)
+                for superclass in term.superclasses(distance=1, with_self=False):
+                    g.add_edge(term.id, superclass.id)
+            pronto_ok = True
+        except Exception:
+            g = nx.DiGraph()  # reset on failure
+
+    # Fall back to manual OBO parsing, or re-parse for relationship edges
+    if not pronto_ok or include_relationships:
+        if not pronto_ok:
+            # Full manual parse: is_a edges (+ relationships if requested)
+            _parse_obo_into_graph(g, obo_path,
+                                  include_is_a=True,
+                                  include_relationships=include_relationships)
+        else:
+            # Pronto succeeded for is_a; only add relationship edges
+            _parse_obo_into_graph(g, obo_path,
+                                  include_is_a=False,
+                                  include_relationships=include_relationships)
 
     return g
+
+
+def _parse_obo_into_graph(g: 'nx.DiGraph', obo_path: str, *,
+                           include_is_a: bool = True,
+                           include_relationships: bool = False) -> None:
+    """Parse an OBO file and add nodes/edges to an existing DiGraph.
+
+    Reads [Term] blocks, skips obsolete terms, and restricts to CL: terms.
+    Edges point from child to parent (same direction as ``is_a``).
+
+    Args:
+        g: NetworkX DiGraph to populate (may already contain nodes).
+        obo_path: Path to OBO file.
+        include_is_a: Add edges for ``is_a:`` lines.
+        include_relationships: Add edges for ``relationship:`` lines whose
+            target is a CL: term (e.g. develops_from, part_of).
+    """
+    current_id = None
+    current_name = None
+    is_a_parents = []
+    rel_parents = []
+    in_term = False
+    is_obsolete = False
+
+    def _flush_term():
+        if not (in_term and current_id and current_id.startswith('CL:')
+                and not is_obsolete):
+            return
+        g.add_node(current_id, name=current_name or current_id)
+        if include_is_a:
+            for p in is_a_parents:
+                if p.startswith('CL:'):
+                    g.add_node(p)  # ensure parent exists
+                    g.add_edge(current_id, p)
+        if include_relationships:
+            for p in rel_parents:
+                if p.startswith('CL:'):
+                    g.add_node(p)
+                    g.add_edge(current_id, p)
+
+    with open(obo_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line == '[Term]':
+                _flush_term()
+                in_term = True
+                current_id = None
+                current_name = None
+                is_a_parents = []
+                rel_parents = []
+                is_obsolete = False
+            elif line.startswith('[') and line.endswith(']'):
+                _flush_term()
+                in_term = False
+            elif in_term:
+                if line.startswith('id: '):
+                    current_id = line[4:].strip()
+                elif line.startswith('name: '):
+                    current_name = line[6:].strip()
+                elif line.startswith('is_a: '):
+                    is_a_parents.append(line[6:].split()[0])
+                elif line.startswith('relationship: '):
+                    # Format: relationship: REL_ID TARGET_ID ! comment
+                    parts = line[14:].split()
+                    if len(parts) >= 2:
+                        rel_parents.append(parts[1])
+                elif line.startswith('is_obsolete: true'):
+                    is_obsolete = True
+
+    _flush_term()  # handle last term
 
 
 # ---------------------------------------------------------------------------

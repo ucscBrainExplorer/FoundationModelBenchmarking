@@ -6,11 +6,10 @@ Comprehensive unit tests have been created for all modules in the UCE Benchmarki
 ## Test Coverage
 
 ### Modules Tested
-1. **data_loader.py** (14 tests)
+1. **data_loader.py** (13 tests)
    - `load_faiss_index()`: 4 tests
    - `load_reference_annotations()`: 4 tests
    - `load_test_batch()`: 5 tests
-   - `download_data_from_s3()`: 1 test
 
 2. **prediction_module.py** (12 tests)
    - `execute_query()`: 5 tests

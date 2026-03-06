@@ -231,13 +231,13 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
             exact_matches = (df['true_label'] == df['prediction_label']).sum()
             exact_match_rate = exact_matches / total_cells if total_cells > 0 else 0.0
             f.write(f"Cells evaluated: {total_cells}\n")
-            f.write(f"Exact CL term match rate: {exact_match_rate:.4f}\n")
+            f.write(f"Exact CL term match rate: {exact_match_rate:.2f}\n")
         else:
             f.write(f"Cells evaluated: {total_cells}\n")
 
         # Write ontology statistics
-        f.write(f"Mean ontology {metric_noun}: {stats['mean']:.4f}\n")
-        f.write(f"Median ontology {metric_noun}: {stats['median']:.4f}\n")
+        f.write(f"Mean ontology {metric_noun}: {stats['mean']:.2f}\n")
+        f.write(f"Median ontology {metric_noun}: {stats['median']:.2f}\n")
         f.write("=" * 60 + "\n\n")
 
         # Metric interpretation guide
@@ -276,16 +276,16 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
         if len(valid_values) > 0:
             f.write(f"{section_title}\n")
             f.write("-" * 80 + "\n")
-            f.write(f"Mean {metric_noun}: {stats['mean']:.4f}\n")
-            f.write(f"Median {metric_noun}: {stats['median']:.4f}\n")
-            f.write(f"Standard deviation: {stats['std']:.4f}\n")
-            f.write(f"Minimum {metric_noun}: {stats['min']:.4f}\n")
-            f.write(f"Maximum {metric_noun}: {stats['max']:.4f}\n\n")
+            f.write(f"Mean {metric_noun}: {stats['mean']:.2f}\n")
+            f.write(f"Median {metric_noun}: {stats['median']:.2f}\n")
+            f.write(f"Standard deviation: {stats['std']:.2f}\n")
+            f.write(f"Minimum {metric_noun}: {stats['min']:.2f}\n")
+            f.write(f"Maximum {metric_noun}: {stats['max']:.2f}\n\n")
 
             f.write("PERCENTILES\n")
             f.write("-" * 80 + "\n")
             for percentile, value in stats['percentiles'].items():
-                f.write(f"{percentile}: {value:.4f}\n")
+                f.write(f"{percentile}: {value:.2f}\n")
             f.write("\n")
 
             # Distribution summary
@@ -325,7 +325,7 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
 
             # Overall exact match rate
             overall_accuracy = valid_df['is_correct'].mean()
-            f.write(f"Overall exact match rate: {overall_accuracy:.4f}\n\n")
+            f.write(f"Overall exact match rate: {overall_accuracy:.2f}\n\n")
 
             # Exact match rate by score
             f.write(f"Exact Match Rate by Ontology {value_label}:\n")
@@ -338,19 +338,19 @@ def generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ont
                 for interval in bin_acc.index:
                     count = int(bin_acc.loc[interval, 'count'])
                     acc = bin_acc.loc[interval, 'mean']
-                    f.write(f"  {value_label} {interval}: {acc:.4f} exact match rate ({count} cells)\n")
+                    f.write(f"  {value_label} {interval}: {acc:.2f} exact match rate ({count} cells)\n")
                 valid_df.drop(columns=['_bin'], inplace=True)
             else:
                 score_acc = valid_df.groupby(col)['is_correct'].agg(['count', 'mean'])
                 for val in sorted(score_acc.index)[:15]:
                     count = int(score_acc.loc[val, 'count'])
                     acc = score_acc.loc[val, 'mean']
-                    f.write(f"  {value_label} {val}: {acc:.4f} exact match rate ({count} cells)\n")
+                    f.write(f"  {value_label} {val}: {acc:.2f} exact match rate ({count} cells)\n")
             f.write("\n")
 
             # Correlation
             correlation = valid_df[col].corr(valid_df['is_correct'])
-            f.write(f"Correlation between {metric_noun} and exact match: {correlation:.4f}\n")
+            f.write(f"Correlation between {metric_noun} and exact match: {correlation:.2f}\n")
             if is_similarity:
                 f.write("(Positive correlation indicates higher similarity associated with exact matches)\n")
             else:
@@ -411,9 +411,9 @@ def main():
     valid_values = df[col].dropna()
     valid_values = valid_values[valid_values >= 0]
     if len(valid_values) > 0:
-        print(f"Average ontology {metric_noun}: {stats['mean']:.4f}")
-        print(f"Median ontology {metric_noun}: {stats['median']:.4f}")
-        print(f"Standard deviation: {stats['std']:.4f}")
+        print(f"Average ontology {metric_noun}: {stats['mean']:.2f}")
+        print(f"Median ontology {metric_noun}: {stats['median']:.2f}")
+        print(f"Standard deviation: {stats['std']:.2f}")
         print(f"Range: {stats['min']} to {stats['max']}")
     else:
         print(f"No valid ontology {metric_noun} values found.")

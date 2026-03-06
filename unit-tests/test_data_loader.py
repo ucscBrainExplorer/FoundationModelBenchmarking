@@ -17,7 +17,6 @@ from data_loader import (
     load_faiss_index,
     load_reference_annotations,
     load_test_batch,
-    download_data_from_s3
 )
 
 
@@ -163,26 +162,6 @@ class TestLoadTestBatch(unittest.TestCase):
         # Check if positive_control is in the discovered datasets
         self.assertIn('positive_control', dataset_ids)
 
-
-class TestDownloadDataFromS3(unittest.TestCase):
-    """Test download_data_from_s3 function."""
-
-    def test_s3_download_no_credentials(self):
-        """Test S3 download without credentials (should handle gracefully)."""
-        # This test will likely fail in CI/local without AWS credentials
-        # We're mainly testing that the function doesn't crash unexpectedly
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # This should raise an error or handle gracefully
-            try:
-                download_data_from_s3(
-                    bucket="test-bucket",
-                    prefix="test-prefix/",
-                    local_dir=tmp_dir,
-                    profile_name="nonexistent-profile"
-                )
-            except (RuntimeError, Exception) as e:
-                # Expected to fail without valid credentials
-                self.assertIsInstance(e, (RuntimeError, Exception))
 
 
 if __name__ == '__main__':

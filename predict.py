@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from data_loader import load_faiss_index, load_reference_annotations
-from prediction_module import execute_query, vote_neighbors
+from prediction_module import execute_query, vote_neighbors, distance_weighted_knn_vote
 from obo_parser import parse_obo_names, parse_obo_replacements
 
 
@@ -41,6 +41,9 @@ def build_parser():
                         help="Test embeddings file (.npy)")
     parser.add_argument("--metadata", type=str, default=None,
                         help="Optional test metadata TSV. All columns will be included in output.")
+    parser.add_argument("--method", type=str, default="distance_weighted_knn",
+                        choices=["majority_voting", "distance_weighted_knn", "both"],
+                        help="Voting method (default: distance_weighted_knn)")
     parser.add_argument("--k", type=int, default=30,
                         help="Number of nearest neighbors (default: 30)")
     parser.add_argument("--output", type=str, default="predictions.tsv",
@@ -136,19 +139,31 @@ def main():
 
     # 7. Query FAISS
     print(f"Querying FAISS index (k={args.k})...")
-    squared_dists, neighbor_indices = execute_query(index, embeddings, k=args.k)
+    squared_dists, neighbor_indices = execute_query(index, embeddings, k=args.k)  # euclidean (L2)
     # FAISS L2 indices return squared Euclidean distances; convert to true Euclidean
     dists = np.sqrt(np.maximum(squared_dists, 0))
     print(f"  Query complete for {n_cells} cells")
 
-    # 8. Majority vote
-    print("Performing majority voting...")
-    predictions, vote_percentages = vote_neighbors(neighbor_indices, ref_df)
+    run_mv = args.method in ('majority_voting', 'both')
+    run_wt = args.method in ('distance_weighted_knn', 'both')
 
-    # 9. Map predicted CL term IDs -> canonical readable names via OBO dict
-    predicted_names = [cl_names.get(pred, pred) for pred in predictions]
+    # 8. Vote
+    cols = {}
+    if run_mv:
+        print("Performing majority voting...")
+        mv_preds, mv_scores = vote_neighbors(neighbor_indices, ref_df)
+        cols['mv_cell_type_ontology_term_id'] = mv_preds
+        cols['mv_cell_type'] = [cl_names.get(p, p) for p in mv_preds]
+        cols['mv_score'] = mv_scores
 
-    # 10. Map each neighbor's CL term ID -> canonical readable name, sorted by distance
+    if run_wt:
+        print("Performing distance-weighted KNN voting...")
+        wt_preds, wt_scores = distance_weighted_knn_vote(neighbor_indices, dists, ref_df)
+        cols['weighted_cell_type_ontology_term_id'] = wt_preds
+        cols['weighted_cell_type'] = [cl_names.get(p, p) for p in wt_preds]
+        cols['weighted_score'] = wt_scores
+
+    # 9. Map each neighbor's CL term ID -> canonical readable name, sorted by distance
     ref_term_ids = ref_df['cell_type_ontology_term_id'].values
     neighbor_distances_list = []
     neighbor_names_list = []
@@ -157,11 +172,8 @@ def main():
         row_indices = neighbor_indices[i]
         row_dists = dists[i]
 
-        # Pair up (distance, neighbor_index), filter invalid
         pairs = [(d, idx) for d, idx in zip(row_dists, row_indices)
                  if idx >= 0 and np.isfinite(d)]
-
-        # Sort by distance (closest first)
         pairs.sort(key=lambda x: x[0])
 
         sorted_dists = [p[0] for p in pairs]
@@ -182,16 +194,13 @@ def main():
             mean_euclidean_distances.append(float('nan'))
             std_euclidean_distances.append(float('nan'))
 
+    cols['mean_euclidean_distance'] = mean_euclidean_distances
+    cols['std_euclidean_distance'] = std_euclidean_distances
+    cols['neighbor_distances'] = neighbor_distances_list
+    cols['neighbor_cell_types'] = neighbor_names_list
+
     # 11. Build output DataFrame
-    predictions_df = pd.DataFrame({
-        'predicted_cell_type_ontology_term_id': predictions,
-        'predicted_cell_type': predicted_names,
-        'vote_percentage': vote_percentages,
-        'mean_euclidean_distance': mean_euclidean_distances,
-        'std_euclidean_distance': std_euclidean_distances,
-        'neighbor_distances': neighbor_distances_list,
-        'neighbor_cell_types': neighbor_names_list,
-    })
+    predictions_df = pd.DataFrame(cols)
 
     # If metadata was provided, prepend all metadata columns to output
     if metadata_df is not None:
@@ -218,19 +227,19 @@ def main():
         f.write(f"# FAISS index: {args.index} ({index.ntotal} vectors, {index.d}d)\n")
         f.write(f"# OBO file: {args.obo} ({len(cl_names)} terms)\n")
         f.write(f"# k: {args.k}\n")
-        f.write(f"# Prediction method: majority voting\n")
+        f.write(f"# method: {args.method}\n")
         f.write(obsolete_comment)
         if args.metadata:
             f.write(f"# Query metadata: {args.metadata}\n")
         output_df.to_csv(f, sep='\t', index=False)
     print(f"\nSaved predictions for {n_cells} cells to {args.output}")
 
-    # Summary
-    n_empty = sum(1 for p in predictions if p == '')
+    # Summary — use whichever predictions were generated
+    top_preds = wt_preds if run_wt else mv_preds
+    n_empty = sum(1 for p in top_preds if p == '')
     if n_empty > 0:
         print(f"  Warning: {n_empty} cells had no valid neighbors for voting")
-    unique_types = len(set(p for p in predictions if p != ''))
-    print(f"  Unique predicted cell types: {unique_types}")
+    print(f"  Unique predicted cell types: {len(set(p for p in top_preds if p))}")
 
 
 if __name__ == "__main__":
