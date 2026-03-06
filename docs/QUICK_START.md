@@ -4,9 +4,9 @@ This guide covers the three standalone programs for cell type prediction and eva
 
 ## Overview
 
-The benchmarking suite has been split into three composable programs:
+The benchmarking suite provides three composable programs:
 
-1. **`predict.py`** — Predict cell types using FAISS k-NN + majority voting
+1. **`predict.py`** — Predict cell types using FAISS k-NN (distance-weighted or majority voting)
 2. **`evaluate.py`** — Evaluate predictions using ontology-based semantic metrics
 3. **`annotate_cl_terms.py`** — Map readable names to CL ontology term IDs
 
@@ -30,8 +30,8 @@ python3 predict.py \
 ```
 
 **Output:** `predictions.tsv` with columns:
-- `predicted_cell_type_ontology_term_id`, `predicted_cell_type`
-- `vote_percentage`, `mean_euclidean_distance`
+- `weighted_cell_type_ontology_term_id`, `weighted_cell_type`, `weighted_score` (default method)
+- `mean_euclidean_distance`, `std_euclidean_distance`
 - `neighbor_distances`, `neighbor_cell_types`
 - Plus all metadata columns if `--metadata` provided
 
@@ -106,7 +106,7 @@ python3 predict.py \
   --output predictions.tsv
 ```
 
-**No evaluation step needed.** The predictions file contains confidence scores (`vote_percentage`) and neighbor distances.
+**No evaluation step needed.** The predictions file contains confidence scores (`weighted_score`) and neighbor distances.
 
 ---
 
@@ -144,6 +144,7 @@ Ontology-based metrics capture semantic closeness, giving partial credit for "ne
 | `--obo` | yes | — | Cell Ontology OBO file |
 | `--embeddings` | yes | — | Test embeddings (.npy) |
 | `--metadata` | no | none | Test metadata TSV. All columns will be included in output. |
+| `--method` | no | `distance_weighted_knn` | `majority_voting`, `distance_weighted_knn`, or `both` |
 | `--k` | no | 30 | Number of nearest neighbors |
 | `--output` | no | `predictions.tsv` | Output TSV path |
 

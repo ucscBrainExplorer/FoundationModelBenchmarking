@@ -14,7 +14,8 @@
 
 ### Purpose
 
-Predict cell types using FAISS k-nearest-neighbor majority voting. **No ground truth labels required.**
+Predict cell types using FAISS k-nearest-neighbor voting. **No ground truth labels required.**
+Two voting methods are available via `--method`: `distance_weighted_knn` (default) and `majority_voting`.
 
 ### Example: Basic Usage
 
@@ -57,24 +58,31 @@ python3 predict.py \
 
 ### Output Format
 
-The output TSV contains one row per cell with these columns:
+The output TSV contains one row per cell. Prediction columns depend on `--method`:
+
+**`distance_weighted_knn` (default):**
 
 | Column | Type | Description |
 |---|---|---|
-| `cell_id` | string | Cell identifier from metadata columns, if provided |
-| `predicted_cell_type_ontology_term_id` | string | Predicted CL term ID (e.g., "CL:0000540") |
-| `predicted_cell_type` | string | Canonical name from OBO (e.g., "neuron") |
-| `vote_percentage` | float | Confidence: fraction of k neighbors agreeing on winner |
-| `mean_euclidean_distance` | float | Mean FAISS distance across all k neighbors |
-| `neighbor_distances` | string | Comma-separated distances to all k neighbors (sorted closest→farthest) |
-| `neighbor_cell_types` | string | Comma-separated canonical names of all k neighbors (same order) |
+| `cell_id` | string | Cell identifier from metadata, if provided |
+| `weighted_cell_type_ontology_term_id` | string | Predicted CL term ID (e.g., "CL:0000540") |
+| `weighted_cell_type` | string | Canonical name from OBO (e.g., "neuron") |
+| `weighted_score` | float | Normalized weight fraction for winner (0–1) |
+| `mean_euclidean_distance` | float | Mean distance to all k neighbors |
+| `std_euclidean_distance` | float | Std of distance to all k neighbors |
+| `neighbor_distances` | string | Comma-separated distances (sorted closest→farthest) |
+| `neighbor_cell_types` | string | Comma-separated canonical names (same order) |
+
+**`majority_voting`:** same but with `mv_cell_type_ontology_term_id`, `mv_cell_type`, `mv_score`.
+
+**`both`:** all columns from both methods.
 
 **Row order:** Always matches the input `.npy` row order. No cells are dropped.
 
 ### Important Notes
 
 - **Reference annotations:** Used only for the `cell_type_ontology_term_id` column during voting. The FAISS index vector IDs must align with the reference DataFrame row indices.
-- **Empty predictions:** Cells where all k neighbors had invalid labels will have `predicted_cell_type_ontology_term_id = ""` and `vote_percentage = NaN`.
+- **Empty predictions:** Cells where all k neighbors had invalid labels will have an empty CL term ID and `NaN` score.
 
 ---
 
@@ -336,7 +344,7 @@ wc -l ground_truth.tsv
 python3 evaluate.py ... --pred_id_col my_column_name
 ```
 
-### Issue: Empty predictions (vote_percentage = NaN)
+### Issue: Empty predictions (score = NaN)
 
 **Cause:** All k neighbors had invalid labels (NaN, empty, or "nan").
 

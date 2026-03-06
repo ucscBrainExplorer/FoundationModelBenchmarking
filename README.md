@@ -19,7 +19,7 @@ The evaluation uses **ontology-aware metrics** based on Cell Ontology (CL) graph
 The benchmarking suite provides three composable programs for flexible workflows:
 
 ### 1. **`predict.py`** — Predict cell types
-Predict cell types using FAISS k-NN + majority voting. **No ground truth required.**
+Predict cell types using FAISS k-NN with distance-weighted voting (default) or majority voting. **No ground truth required.**
 
 ```bash
 python3 predict.py \
@@ -138,31 +138,37 @@ Note: on DAGs with multiple inheritance (the Cell Ontology has 33.5% multi-paren
 
 ```
 FoundationModelBenchmarking/
-├── predict.py                     # NEW: Standalone prediction
-├── evaluate.py                    # NEW: Standalone evaluation
-├── annotate_cl_terms.py           # NEW: Standalone annotation
-├── obo_parser.py                  # NEW: OBO file parsing
+├── predict.py                     # Standalone prediction
+├── evaluate.py                    # Standalone evaluation
+├── annotate_cl_terms.py           # Standalone annotation (names → CL IDs)
+├── obo_parser.py                  # OBO file parsing
 │
 ├── data_loader.py                 # Data ingestion
-├── prediction_module.py           # KNN search and voting logic
+├── prediction_module.py           # KNN search, majority voting, distance-weighted voting
 ├── ontology_utils.py              # Cell Ontology: IC similarity + path distance
 ├── analyze_ontology_results.py    # Statistical analysis and reporting
 ├── visualization.py               # UMAP plots and confusion matrices
 │
+├── cell_labelling/                # Standalone deployment tool (no ground truth needed)
+│   ├── predict.py                 # Label cells via KNN against a UCE reference
+│   ├── distance_analysis.py       # Assess mapping quality via distance distributions
+│   └── README.md
+│
 ├── utility/
 │   └── normalize_cell_types.py    # Cell type name normalization
 │
-├── tests/                         # Modern pytest suite
+├── tests/                         # pytest suite
 │   ├── conftest.py
 │   ├── test_obo_parser.py
 │   ├── test_predict.py
 │   ├── test_evaluate.py
-│   └── test_annotate_cl_terms.py
+│   ├── test_annotate_cl_terms.py
+│   └── test_generate_remap.py
 │
-├── unit-tests/                    # Legacy test suite
-│   ├── test_ontology_utils.py     # 32 tests (IC similarity, path distance, scoring)
-│   ├── test_prediction_module.py  # 10 tests (requires faiss)
-│   └── test_data_loader.py        # 8 tests (requires faiss)
+├── unit-tests/                    # Legacy unittest suite
+│   ├── test_ontology_utils.py
+│   ├── test_prediction_module.py
+│   └── test_data_loader.py
 │
 ├── docs/                          # Documentation
 │   ├── QUICK_START.md             # Quick start guide
@@ -171,10 +177,9 @@ FoundationModelBenchmarking/
 │
 ├── requirements.txt               # Python dependencies
 ├── Dockerfile                     # Container definition
-├── BUGFIX_NOTES.md                # Documents 6 bug fixes with lessons
+├── BUGFIX_NOTES.md                # Bug fix notes
 ├── IC_FORMULA_ANALYSIS.md         # IC formula comparison and analysis
-├── CHANGELOG.md                   # Commit-level change log
-├── IMPLEMENTATION_SUMMARY.md      # Refactoring summary
+├── CHANGELOG.md                   # Change log
 └── README.md                      # This file
 ```
 

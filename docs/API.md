@@ -112,23 +112,19 @@ for ds in datasets:
 
 Execute FAISS queries and perform majority voting.
 
-### `execute_query(index: faiss.Index, query_embeddings: np.ndarray, k: int = 30, metric: str = 'euclidean') -> Tuple[np.ndarray, np.ndarray]`
+### `execute_query(index: faiss.Index, query_embeddings: np.ndarray, k: int = 30) -> Tuple[np.ndarray, np.ndarray]`
 
-Query a FAISS index for k-nearest neighbors.
+Query a FAISS index for k-nearest neighbors using Euclidean (L2) distance.
 
 **Args:**
 - `index` (faiss.Index): FAISS index
 - `query_embeddings` (np.ndarray): Query vectors, shape `(n_queries, dim)`
 - `k` (int): Number of nearest neighbors (default: 30)
-- `metric` (str): Distance metric (`'euclidean'` only, default)
 
 **Returns:**
-- `tuple`: `(dists, indices)`
-  - `dists` (np.ndarray): Shape `(n_queries, k)`, L2 distances
+- `tuple`: `(squared_dists, indices)`
+  - `squared_dists` (np.ndarray): Shape `(n_queries, k)`, squared L2 distances (convert with `np.sqrt`)
   - `indices` (np.ndarray): Shape `(n_queries, k)`, neighbor vector IDs
-
-**Raises:**
-- `ValueError`: If `metric != 'euclidean'`
 
 **Example:**
 ```python
@@ -139,9 +135,32 @@ from prediction_module import execute_query
 index = load_faiss_index("index.faiss")
 embeddings = np.load("test.npy")
 
-dists, neighbor_indices = execute_query(index, embeddings, k=30)
-print(f"Queried {len(embeddings)} cells, got {neighbor_indices.shape[1]} neighbors each")
+sq_dists, neighbor_indices = execute_query(index, embeddings, k=30)
+dists = np.sqrt(np.maximum(sq_dists, 0))  # convert to Euclidean
 ```
+
+### `gaussian_kernel_weights(dists: np.ndarray, eps: float = 1e-8) -> np.ndarray`
+
+Convert Euclidean distances to Gaussian kernel weights. sigma is set per-row to the median distance.
+
+**Args:**
+- `dists` (np.ndarray): Shape `(n_queries, k)`, Euclidean distances
+- `eps` (float): Minimum sigma to avoid division by zero
+
+**Returns:**
+- `np.ndarray`: Shape `(n_queries, k)`, weights in (0, 1]
+
+### `distance_weighted_knn_vote(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, reference_annotations: pd.DataFrame) -> Tuple[List[str], List[float]]`
+
+Distance-weighted KNN voting. Closer neighbors contribute more weight to their label.
+
+**Args:**
+- `neighbor_indices` (np.ndarray): Shape `(N, k)`, FAISS indices
+- `neighbor_dists` (np.ndarray): Shape `(N, k)`, Euclidean distances
+- `reference_annotations` (pd.DataFrame): Reference annotations with `cell_type_ontology_term_id`
+
+**Returns:**
+- `tuple`: `(predictions, vote_percentages)` — same shape as `vote_neighbors`
 
 ### `vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataFrame) -> Tuple[List[str], List[float]]`
 
@@ -213,7 +232,7 @@ from ontology_utils import load_ontology, precompute_ic
 graph = load_ontology("cl.obo")
 ic_values = precompute_ic(graph, k=0.5)
 
-print(f"IC(neuron) = {ic_values['CL:0000540']:.4f}")
+print(f"IC(neuron) = {ic_values['CL:0000540']:.2f}")
 ```
 
 ### `calculate_per_cell_distances(graph: nx.DiGraph, predictions: List[str], ground_truth: List[str], method: str = 'shortest_path', ic_values: Dict[str, float] = None) -> List[float]`
@@ -269,8 +288,8 @@ from analyze_ontology_results import calculate_ontology_statistics
 df = pd.read_csv("per_cell_evaluation.tsv", sep='\t')
 stats = calculate_ontology_statistics(df, ontology_method='ic')
 
-print(f"Mean IC similarity: {stats['mean']:.4f}")
-print(f"Median: {stats['median']:.4f}")
+print(f"Mean IC similarity: {stats['mean']:.2f}")
+print(f"Median: {stats['median']:.2f}")
 ```
 
 ### `generate_summary_report(df: pd.DataFrame, stats: Dict, output_path: str, ontology_method: str = 'ic')`
@@ -334,7 +353,7 @@ CL:0000540    # matched with row 2 of predictions
 import numpy as np
 import pandas as pd
 from data_loader import load_faiss_index, load_reference_annotations
-from prediction_module import execute_query, vote_neighbors
+from prediction_module import execute_query, distance_weighted_knn_vote
 from ontology_utils import load_ontology, precompute_ic, calculate_per_cell_distances
 from analyze_ontology_results import calculate_ontology_statistics, generate_summary_report
 from obo_parser import parse_obo_names
@@ -348,8 +367,9 @@ ic_values = precompute_ic(graph, k=0.5)
 
 # 2. Predict
 embeddings = np.load("test_data/test.npy")
-dists, neighbor_indices = execute_query(index, embeddings, k=30)
-predictions, vote_percentages = vote_neighbors(neighbor_indices, ref_df)
+sq_dists, neighbor_indices = execute_query(index, embeddings, k=30)
+dists = np.sqrt(np.maximum(sq_dists, 0))
+predictions, vote_percentages = distance_weighted_knn_vote(neighbor_indices, dists, ref_df)
 
 # 3. Evaluate (requires ground truth)
 ground_truth_df = pd.read_csv("test_data/ground_truth.tsv", sep='\t')
@@ -376,6 +396,6 @@ results_df = pd.DataFrame({
 stats = calculate_ontology_statistics(results_df, ontology_method='ic')
 generate_summary_report(results_df, stats, "evaluation_report.txt", ontology_method='ic')
 
-print(f"Mean IC similarity: {stats['mean']:.4f}")
-print(f"Exact match rate: {results_df['is_exact_match'].mean():.4f}")
+print(f"Mean IC similarity: {stats['mean']:.2f}")
+print(f"Exact match rate: {results_df['is_exact_match'].mean():.2f}")
 ```
