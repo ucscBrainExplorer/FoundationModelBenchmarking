@@ -1,0 +1,13 @@
+# Demo data — large binary files, not tracked in git
+demodata/*.faiss
+demodata/*.h5ad
+demodata/*.tsv.gz
+
+# Outputs
+labels.tsv
+distance_analysis.png
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
