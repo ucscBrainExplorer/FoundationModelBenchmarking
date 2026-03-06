@@ -277,7 +277,6 @@ def main():
     valid_dists = np.where(indices >= 0, dists, np.nan)
     mean_distances = np.nanmean(valid_dists, axis=1).tolist()
 
-    nb_dists = neighbor_distances_str(indices, dists)
     cols = {'cell_id': cell_ids}
 
     if run_mv:
@@ -309,7 +308,6 @@ def main():
 
     cols.update({
         'mean_euclidean_distance': mean_distances,
-        'neighbor_distances':      nb_dists,
     })
 
     output_df = pd.DataFrame(cols)

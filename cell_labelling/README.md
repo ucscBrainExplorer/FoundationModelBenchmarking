@@ -68,7 +68,6 @@ python3 predict.py \
 |---|---|
 | `cell_id` | Cell barcode from `adata.obs_names` |
 | `mean_euclidean_distance` | Mean distance to all k neighbors |
-| `neighbor_distances` | Comma-separated distances, closest to furthest |
 
 **`distance_weighted_knn`** columns (prefix `weighted_`):
 
