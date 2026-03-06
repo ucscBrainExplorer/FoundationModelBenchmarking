@@ -117,9 +117,6 @@ python3 distance_analysis.py \
   --labels    labels.tsv \
   --adata     demodata/query_uce_adata.h5ad \
   --index     demodata/index_ivfflat.faiss \
-  --k         30 \
-  --n_sample  10000 \
-  --output    distance_analysis.png
 ```
 
 ### Arguments
