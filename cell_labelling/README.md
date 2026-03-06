@@ -36,9 +36,6 @@ python3 predict.py \
   --adata     demodata/query_uce_adata.h5ad \
   --ref_annot demodata/ref_obs.tsv.gz \
   --obo       demodata/cl-basic.obo \
-  --method    distance_weighted_knn \
-  --k         30 \
-  --output    labels.tsv
 ```
 
 ### Arguments
