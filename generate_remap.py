@@ -1,31 +1,284 @@
 #!/usr/bin/env python3
 """
-Auto-detect annotation columns in a ground truth file and generate a remap TSV
-that maps author labels to Cell Ontology (CL) term IDs.
+generate_remap.py — map author cell type labels to Cell Ontology (CL) term IDs.
 
-Scans each column for cell-type-like labels, scores by OBO resolvability, picks
-the best column (or uses --column), and writes a mapping table.  The output can
-be fed to ``evaluate.py --remap-file`` to replace lossy cellxgene CL labels with
-more specific author annotations.
+Reads an annotated single-cell TSV (or .tsv.gz), auto-detects the most granular
+annotation column, and produces a remap TSV consumed by evaluate.py --remap-file.
 
-Usage:
+Usage
+-----
   python3 generate_remap.py \
-    --input ground_truth.tsv \
-    --obo cl-basic.obo \
-    --output remap.tsv \
-    [--column annot_level_3_rev2]
+      --input  obs_annotated.tsv.gz \
+      --obo    cl-basic.obo \
+      --output remap.tsv \
+      [--column Type_updated] \
+      [--pdf   paper.pdf] \
+      [--doi   10.1234/example]
+
+Output columns
+--------------
+  original_label                    author label string
+  mapped_cell_label                          plain-English description (see Cell label below)
+  mapped_cell_label_method                   cl_term_name | glossary | llm | original
+  mapped_cell_label_ontology_term_id         resolved CL ID (empty if unresolved)
+  mapped_cell_label_ontology_term_name       canonical OBO name for the resolved CL term
+  mapped_cell_label_ontology_term_match_method  resolution method (see Resolution cascade below)
+  cellxgene_cell_type               cellxgene display label(s) co-occurring with
+                                    this author label (pipe-separated if multiple)
+  cellxgene_cell_type_ontology_term_id  corresponding cellxgene CL IDs
+
+-------------------------------------------------------------------------------
+STEP 1 — Column selection
+-------------------------------------------------------------------------------
+If --column is not given, the annotation column hierarchy is detected
+automatically.  Candidate columns are filtered by removing:
+  - Numeric columns (>80 % of first 200 values parse as float)
+  - High-cardinality columns (>1000 unique values — likely barcodes/IDs)
+  - Low-cardinality columns (<3 unique values — likely flags)
+  - CL-ID columns (>90 % values match CL:NNNNNNN pattern)
+  - CellxGene display columns (paired with a *_ontology_term_id column)
+
+Among remaining candidates, parent–child relationships are inferred by
+functional dependency: C is a child of P if every value in C maps to exactly
+one value in P and P has fewer unique values.  The leaf column (no children)
+is selected; ties broken by preferring the latest-appearing column.
+
+-------------------------------------------------------------------------------
+STEP 2 — Resolution cascade
+-------------------------------------------------------------------------------
+Each unique label is attempted in order, stopping at first success:
+
+  already_cl     label already matches CL:NNNNNNN — passed through
+  exact          case-insensitive match to canonical OBO name
+  synonym        case-insensitive match to OBO synonym string
+  fuzzy          fuzzy_normalize(label) vs fuzzy_normalize(OBO names)
+  fuzzy_synonym  fuzzy_normalize(label) vs fuzzy_normalize(OBO synonyms)
+  llm            cascade above failed → LLM resolution (Steps 4–5)
+  no_cl_term_found  all methods failed; cl_term_id left empty
+
+Uninformative labels (unknown, unassigned, doublet, ambiguous, etc.) skip all
+resolution and are written as no_cl_term_found immediately.
+
+Obsolete CL terms (is_obsolete: true in OBO) are excluded from all lookups.
+
+-------------------------------------------------------------------------------
+STEP 3 — Pre-LLM preparation
+-------------------------------------------------------------------------------
+3a. PDF / DOI context
+    If --pdf is given, text is extracted and sent to Gemini (preferred, to
+    spare Claude TPM quota; falls back to Claude) to produce a compact
+    glossary of the form "LABEL: plain English description".  Glossary keys
+    are normalised (lowercased, em/en-dash → hyphen) before lookup.
+
+3b. Parent subtree precomputation
+    Parent columns detected via functional dependency; each parent label is
+    resolved to a CL ID using the exact/synonym/fuzzy cascade (no LLM).
+    The ontology subtree of each resolved parent is precomputed for candidate
+    scoring in Step 4.
+
+3c. Cell label generation (one per unresolved label)
+    Plain-English description produced in priority order:
+      1. PDF glossary lookup (exact, ±plural 's', dash-normalised)  → [glossary]
+      2. Claude LLM: "describe this cell type in plain English"      → [llm]
+      3. Original label string as-is                                 → [original]
+    Used as the candidate-filter query in Step 4 and as the cell_label output.
+    For labels that resolve via LLM in Step 5, cell_label is overwritten with
+    the resolved CL term's canonical name (cell_label_method = cl_term_name).
+
+-------------------------------------------------------------------------------
+STEP 4 — Candidate filtering  (_apply_marker_filter + _filter_candidate_terms)
+-------------------------------------------------------------------------------
+Narrows ~2,500 CL terms to ≤100 candidates for the LLM prompt.
+
+4a. Marker gene pre-filter  (_apply_marker_filter)
+    Applied to the full OBO name dict BEFORE keyword scoring.  If the label
+    or hint contains a recognised marker gene token (VIP, SST, PV/PVALB,
+    SNCG, LAMP5, CCK, NPY), the pool is restricted to CL terms whose
+    canonical name contains the corresponding marker string (e.g. 'pvalb').
+    This guarantees marker-specific terms survive the top-100 cut even when
+    many high-scoring non-marker terms exist.
+
+4b. Keyword scoring  (_filter_candidate_terms)
+    Runs on the (possibly pre-filtered) pool:
+    - Keywords extracted from "label + hint" (stop words removed, ≥2 chars).
+    - Each CL term scored by keyword overlap; zero-overlap terms excluded.
+    - Anchor set: terms matching original label keywords are guaranteed
+      inclusion regardless of expansion scoring.
+    - Synonym expansion: build_keyword_expansion() maps author-vocabulary words
+      to OBO vocabulary (e.g. excitatory → glutamatergic) via synonym lines;
+      expanded matches fill remaining slots at 0.9× priority.
+    - Parent subtree boost: terms within the resolved parent's ontology subtree
+      receive a 2× score multiplier, promoting in-lineage terms.
+    - Top max_candidates (default 100) returned.
+
+-------------------------------------------------------------------------------
+STEP 5 — LLM resolution  (_resolve_with_llm)
+-------------------------------------------------------------------------------
+Two LLMs are queried in parallel per label:
+  Primary:   Claude (claude-sonnet-4-6)  via ANTHROPIC_API_KEY
+  Secondary: Gemini 2.5 Flash            via GOOGLE_API_KEY
+Each call is retried up to 2× (5 s / 10 s backoff) on 529/429 overload.
+
+Prompt rules (annotate_cl_terms.py):
+  - HARD RULE: if label contains a marker gene, prefer the marker-specific term
+    over any broader lineage or origin term.
+  - HARD RULE: if a distinctive biological word in the label (e.g. tripotential,
+    corticothalamic) appears verbatim in a candidate term name, prefer that term.
+  - Prefer the most specific term capturing ALL meaningful parts of the label.
+  - Do NOT pick a term that adds specificity absent from the label (e.g. a
+    brain region or cortical layer not mentioned in the label).
+  - Reply NONE if no term is a confident match.
+
+Voting on disagreement (main pass):
+  Both agree            → llm_consensus
+  Disagree              → more specific (ontology child) wins; Claude on tie
+                          → llm_claude or llm_gemini
+  One returns NONE      → other model's answer used (no veto in main pass)
+  Both return NONE      → label proceeds to ancestor fallback
+
+Ancestor fallback pass:
+  Relaxed prompt asks for the closest valid ancestor, explicitly allowing
+  maturity, sub-region, or origin qualifiers to be dropped.  Result tagged
+  llm_ancestor.  Voting same as main pass; G=G (child-wins) applied.
+
+Post-resolution de-specification  (_despecify_cl_term):
+  Any resolved CL term whose canonical name ends with a species qualifier
+  (e.g. "(Mus musculus)", "(Homo sapiens)") is replaced by the nearest
+  species-agnostic is_a ancestor via BFS up the ontology graph.
+
+-------------------------------------------------------------------------------
+STEP 6 — Output TSV + provenance header
+-------------------------------------------------------------------------------
+The output file begins with comment lines recording:
+  # generated: <ISO timestamp>
+  # input: <path>  column: <col>  obo: <path>
+Followed by a header row and one data row per unique label.
+
+-------------------------------------------------------------------------------
+STEP 7 — Hierarchy consistency check  (stdout only)
+-------------------------------------------------------------------------------
+For each group of labels sharing the same immediate parent value, the Most
+Informative Common Ancestor (MICA) of all resolved CL IDs is computed:
+  IC > 0.1                 → consistent
+  IC ≤ 0.1                 → weak (very generic common ancestor)
+  MICA = CL:0000000 (cell) → WARNING
+  MICA not within parent's ontology subtree → WARNING (suppressed when no
+    individual terms are flagged, to avoid multiple-inheritance false positives)
+Individual terms outside the parent's subtree are flagged [!].
+Only groups with at least one WARNING are printed.
 """
 
 import argparse
 import os
 import re
 import sys
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="google")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="networkx")
 
 import pandas as pd
+import requests
 
 from evaluate import build_label_mapping, resolve_name, _is_cl_id
 from obo_parser import parse_obo_names
-from annotate_cl_terms import fuzzy_normalize, query_llm_mapping
+from annotate_cl_terms import fuzzy_normalize, query_llm_mapping, query_llm_ancestor, query_llm_label, FatalAPIError
+
+
+def fetch_doi_context(doi):
+    """Fetch title and abstract for a DOI via the CrossRef API.
+
+    Returns:
+        A context string combining title and abstract, or None on failure.
+    """
+    url = f"https://api.crossref.org/works/{doi}"
+    try:
+        resp = requests.get(url, timeout=10,
+                            headers={"User-Agent": "generate_remap/1.0 (cell-type-annotation)"})
+        resp.raise_for_status()
+        msg = resp.json().get("message", {})
+        title = ' '.join(msg.get("title", []))
+        abstract = msg.get("abstract", "")
+        # Strip JATS XML tags that CrossRef sometimes includes
+        abstract = re.sub(r'<[^>]+>', ' ', abstract).strip()
+        parts = [p for p in [title, abstract] if p]
+        return ' '.join(parts) if parts else None
+    except Exception as e:
+        print(f"  Warning: could not fetch DOI context: {e}")
+        return None
+
+
+def extract_pdf_text(pdf_path, max_pages=20):
+    """Extract plain text from a PDF, capped at max_pages to avoid supplements.
+
+    Returns:
+        Extracted text string, or None on failure.
+    """
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(pdf_path)
+        pages = reader.pages[:max_pages]
+        text = '\n'.join(page.extract_text() or '' for page in pages)
+        return text.strip() or None
+    except Exception as e:
+        print(f"  Warning: could not read PDF: {e}")
+        return None
+
+
+def extract_cell_type_glossary(pdf_text, api='claude'):
+    """Ask an LLM to extract a compact cell type glossary from paper text.
+
+    Makes a single LLM call and returns a concise glossary string for use
+    as context in subsequent label queries.
+
+    Returns:
+        Glossary string, or None on failure.
+    """
+    # Truncate to ~6000 words — abbreviations/glossaries appear early in papers
+    words = pdf_text.split()
+    if len(words) > 6000:
+        pdf_text = ' '.join(words[:6000]) + ' [truncated]'
+
+    prompt = (
+        f"The following is text from a single-cell transcriptomics paper. "
+        f"Extract a compact glossary of all cell type labels, abbreviations, "
+        f"and their plain English meanings described in the paper. "
+        f"Format: one entry per line as 'LABEL: plain English name'. "
+        f"Include only cell types, not other abbreviations.\n\n{pdf_text}"
+    )
+    def _call():
+        if api == 'claude':
+            import anthropic
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.content[0].text.strip()
+        elif api == 'gemini':
+            from google import genai as google_genai
+            client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            return ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+        return None
+
+    for attempt in range(3):
+        try:
+            return _call()
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(k in err_str for k in ('credit', 'billing', 'unauthorized', 'invalid_api_key', 'permission')):
+                print(f"  Warning: glossary extraction failed (fatal): {e}")
+                return None
+            if attempt < 2 and any(k in err_str for k in ('529', 'overloaded', '429', 'rate_limit', 'timeout')):
+                wait = 10 * (attempt + 1)
+                print(f"  Warning: {api} overloaded, retrying in {wait}s...")
+                import time
+                time.sleep(wait)
+                continue
+            print(f"  Warning: glossary extraction failed: {e}")
+            return None
+    return None
 
 
 def build_parser():
@@ -42,14 +295,45 @@ def build_parser():
                         help="Annotation column to use (auto-detect if omitted)")
     parser.add_argument("--min-score", type=float, default=0.10,
                         help="Minimum resolvability fraction to consider a column (default: 0.10)")
-    parser.add_argument("--use-llm", action="store_true", default=False,
-                        help="Use LLM to resolve unmatched labels. "
-                             "Requires ANTHROPIC_API_KEY or OPENAI_API_KEY env var.")
+    parser.add_argument("--doi", type=str, default=None,
+                        help="DOI of the source paper (e.g. 10.1038/s41586-024-12345-6). "
+                             "Abstract and title are fetched from CrossRef and used as "
+                             "context when generating cell labels.")
+    parser.add_argument("--pdf", type=str, default=None,
+                        help="Path to the source paper PDF. The LLM extracts a cell type "
+                             "glossary in one upfront call, which is then used as context "
+                             "for all label queries. Overrides --doi if both are given.")
     return parser
+
+
+_METADATA_NAME_TOKENS = {
+    'id', 'ids', 'barcode', 'barcodes', 'index', 'indices',
+    'sample', 'samples', 'donor', 'donors', 'batch', 'batches',
+    'uuid', 'accession', 'key',
+}
+
+# Standard cellxgene schema metadata columns that are never cell type annotations
+_CELLXGENE_METADATA_COLS = {
+    'assay', 'development_stage', 'disease', 'donor_id', 'self_reported_ethnicity',
+    'sex', 'suspension_type', 'tissue', 'tissue_type',
+}
 
 
 def _is_metadata_column(col_name, values):
     """Heuristic: return True if the column looks like metadata, not annotations."""
+    # Ontology term ID columns are always IDs, never annotation labels
+    if col_name.endswith('_ontology_term_id'):
+        return True
+
+    # Known cellxgene schema metadata columns
+    if col_name in _CELLXGENE_METADATA_COLS:
+        return True
+
+    # Column name tokens (split on _, -, space) contain known ID/metadata keywords
+    tokens = set(re.split(r'[_\-\s]+', col_name.lower()))
+    if tokens & _METADATA_NAME_TOKENS:
+        return True
+
     non_null = [v for v in values if pd.notna(v)]
     if not non_null:
         return True
@@ -111,25 +395,12 @@ def score_column(values, name_to_id, synonym_to_id, fuzzy_name_to_id,
     return score, len(unique_labels), n_resolved
 
 
-def detect_best_column(df, obo_path, min_score=0.10):
-    """Auto-detect the best annotation column for remapping.
+def _get_cellxgene_cols(df):
+    """Return the set of cellxgene display-name columns to skip.
 
-    Scans all columns, skips metadata, scores by OBO resolvability,
-    and returns the best column above the threshold.
-
-    Args:
-        df: DataFrame to scan.
-        obo_path: Path to OBO file.
-        min_score: Minimum resolvability fraction to accept.
-
-    Returns:
-        Tuple of (column_name_or_None, scores_report_string).
+    A column is a cellxgene display column if a paired "{col}_ontology_term_id"
+    column exists and contains >90% CL IDs.
     """
-    cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id = \
-        build_label_mapping(obo_path)
-
-    # Detect cellxgene paired columns: if "{col}_ontology_term_id" exists
-    # and contains CL IDs, then "{col}" is a cellxgene label column — skip both.
     cellxgene_cols = set()
     for col in df.columns:
         paired = col + '_ontology_term_id'
@@ -138,64 +409,253 @@ def detect_best_column(df, obo_path, min_score=0.10):
             cl_frac = sum(1 for v in sample if _is_cl_id(str(v).strip())) / max(len(sample), 1)
             if cl_frac > 0.9:
                 cellxgene_cols.add(col)
-    if cellxgene_cols:
-        print(f"  Skipping cellxgene label columns: {sorted(cellxgene_cols)}")
+    return cellxgene_cols
 
-    results = []  # (col_name, score, n_unique, n_resolved)
 
+def detect_leaf_column(df):
+    """Detect the most granular annotation column via hierarchy inference.
+
+    Filters candidate annotation columns, builds parent-child relationships
+    among them using functional dependency, and returns the leaf (the column
+    with no finer-grained children).  If multiple leaves exist, the one
+    appearing latest in the file is preferred (updated columns come after
+    their predecessors).
+
+    Returns:
+        Tuple of (column_name_or_None, report_string).
+    """
+    cellxgene_cols = _get_cellxgene_cols(df)
+
+    # Collect candidate annotation columns in file order, excluding cellxgene cols
+    candidates = []
     for col in df.columns:
         if col in cellxgene_cols:
             continue
-        vals = df[col].tolist()
-        if _is_metadata_column(col, vals):
-            continue
+        if not _is_metadata_column(col, df[col].tolist()):
+            candidates.append(col)
 
-        score, n_unique, n_resolved = score_column(
-            vals, name_to_id, synonym_to_id,
-            fuzzy_name_to_id, fuzzy_synonym_to_id, cl_names)
-        results.append((col, score, n_unique, n_resolved))
+    # If filtering cellxgene cols leaves nothing, fall back to including them —
+    # they may be the only annotation columns available
+    if not candidates and cellxgene_cols:
+        print(f"  No author annotation columns found — falling back to cellxgene label columns: {sorted(cellxgene_cols)}")
+        for col in df.columns:
+            if col in cellxgene_cols and not _is_metadata_column(col, df[col].tolist()):
+                candidates.append(col)
+    elif cellxgene_cols:
+        skipped_info = ', '.join(f"'{c}' ({df[c].nunique()} categories)" for c in sorted(cellxgene_cols))
+        print(f"  Skipping cellxgene label columns: {skipped_info}")
 
-    if not results:
+    if not candidates:
         return None, "No candidate annotation columns found."
 
-    # Rank by: most resolved labels first, then most unique labels (granularity)
-    results.sort(key=lambda x: (x[3], x[2]), reverse=True)
+    # Determine which candidates have at least one child among the candidates.
+    # C is a child of P when: every unique value of C maps to exactly one value
+    # of P, and C has strictly more unique values than P.
+    nunique = {col: df[col].nunique() for col in candidates}
+    has_child = set()
+    for P in candidates:
+        for C in candidates:
+            if C == P or nunique[C] <= nunique[P]:
+                continue
+            pairs = df[[C, P]].dropna()
+            if len(pairs) == 0:
+                continue
+            if (pairs.groupby(C)[P].nunique() == 1).all():
+                has_child.add(P)
+                break  # P has at least one child; no need to check further
 
-    lines = ["Column resolvability scores:"]
-    for col, score, n_unique, n_resolved in results:
-        marker = " <-- best" if col == results[0][0] and results[0][1] >= min_score else ""
-        lines.append(f"  {col}: {score:.0%} ({n_resolved}/{n_unique} unique labels){marker}")
+    leaves = [col for col in candidates if col not in has_child]
 
-    best_col, best_score, _, _ = results[0]
-    if best_score < min_score:
-        lines.append(f"\nNo column meets the minimum threshold ({min_score:.0%}).")
-        return None, '\n'.join(lines)
+    lines = ["Column hierarchy detection:"]
+    lines.append(f"  Candidate columns: {candidates}")
+    lines.append(f"  Columns with children (non-leaf): {sorted(has_child)}")
 
-    return best_col, '\n'.join(lines)
+    if not leaves:
+        # Degenerate case: every column appears to have a child (cycle or all same size)
+        # Fall back to the last candidate with the most unique values.
+        leaves = [max(candidates, key=lambda c: (nunique[c], candidates.index(c)))]
+        lines.append(f"  No clear leaf found — falling back to most granular: '{leaves[0]}'")
+    else:
+        lines.append(f"  Leaf column(s): {leaves}")
+
+    # Among leaves, prefer columns whose name signals a revision, then fall
+    # back to latest in file order (updated columns appear after originals).
+    _REVISED_PATTERN = re.compile(
+        r'\b(updated|revised|final|corrected|curated|clean|v\d)\b', re.IGNORECASE
+    )
+    selected = max(leaves, key=lambda c: (
+        bool(_REVISED_PATTERN.search(c)),
+        candidates.index(c)
+    ))
+    lines.append(f"  Selected: '{selected}' ({nunique[selected]} unique labels)")
+
+    return selected, '\n'.join(lines)
 
 
-def _filter_candidate_terms(label, cl_names, max_candidates=200):
+# ---------------------------------------------------------------------------
+# Species qualifier patterns
+# ---------------------------------------------------------------------------
+# Matches CL term names that end with a parenthesised species name, e.g.
+# "(Mus musculus)", "(Homo sapiens)", "(Mmus)", "(Hsap)".
+_SPECIES_QUALIFIER = re.compile(
+    r'\(\s*(?:Mus musculus|Homo sapiens|Rattus norvegicus|Mmus|Hsap|[A-Z][a-z]+ [a-z]+)\s*\)\s*$'
+)
+
+
+def _despecify_cl_term(cl_id, cl_names, G):
+    """Return the nearest species-agnostic is_a ancestor of a species-specific CL term.
+
+    If cl_id's canonical name ends with a species qualifier (e.g. '(Mus musculus)'),
+    walks up the is_a hierarchy (edges point child→parent) level by level.  At each
+    level, all species-agnostic candidates are scored by keyword overlap with the
+    original term name (species qualifier stripped) and the best-scoring one is
+    returned.  This prevents picking a broad morphology parent (e.g. 'bipolar neuron')
+    over a specific functional parent (e.g. 'VIP GABAergic interneuron') when both
+    are direct is_a parents.
+    Returns (cl_id, cl_name) unchanged when already species-agnostic or no agnostic
+    ancestor exists.
+    """
+    name = cl_names.get(cl_id, '')
+    if not _SPECIES_QUALIFIER.search(name):
+        return cl_id, name
+
+    # Strip species qualifier from original name for keyword scoring
+    base_name = _SPECIES_QUALIFIER.sub('', name).strip().lower()
+    base_words = set(re.split(r'[\s\-_/]+', base_name)) - {'', 'cell', 'the', 'of', 'a'}
+
+    def _score(parent_name):
+        pwords = set(re.split(r'[\s\-_/]+', parent_name.lower())) - {'', 'cell', 'the', 'of', 'a'}
+        return len(base_words & pwords)
+
+    visited = {cl_id}
+    # BFS level by level so we prefer closer ancestors
+    current_level = [p for p in G.successors(cl_id) if p.startswith('CL:')]
+    while current_level:
+        next_level = []
+        agnostic = []
+        for parent_id in current_level:
+            if parent_id in visited:
+                continue
+            visited.add(parent_id)
+            parent_name = cl_names.get(parent_id, '')
+            if not parent_name:
+                next_level.extend(p for p in G.successors(parent_id) if p.startswith('CL:'))
+                continue
+            if _SPECIES_QUALIFIER.search(parent_name):
+                next_level.extend(p for p in G.successors(parent_id) if p.startswith('CL:'))
+            else:
+                agnostic.append((parent_id, parent_name))
+
+        if agnostic:
+            # Pick best keyword-overlap match among agnostic parents at this level
+            best_id, best_name = max(agnostic, key=lambda x: _score(x[1]))
+            return best_id, best_name
+
+        current_level = next_level
+
+    return cl_id, name  # no agnostic ancestor found — keep original
+
+
+# ---------------------------------------------------------------------------
+# Marker gene pre-filter
+# ---------------------------------------------------------------------------
+# Maps token strings (as they appear in author labels/hints after splitting on
+# whitespace and [-_/] separators) to the canonical string used in CL term
+# names.  When a label/hint contains one of these tokens, candidate CL terms
+# are restricted to those whose name contains the canonical marker string —
+# before the LLM call.  This makes marker gene resolution deterministic and
+# independent of the LLM prompt.
+#
+# Extend this dict when working with a new dataset that introduces new marker
+# abbreviations.  Two-letter tokens (cr, cb) are intentionally omitted to
+# avoid false positives.
+MARKER_GENES = {
+    'vip':        'vip',
+    'sst':        'sst',
+    'pv':         'pvalb',
+    'pvalb':      'pvalb',
+    'parvalbumin':'pvalb',
+    'sncg':       'sncg',
+    'lamp5':      'lamp5',
+    'cck':        'cck',
+    'npy':        'npy',
+}
+
+
+def _apply_marker_filter(candidates, label, hint):
+    """Restrict candidates to marker-specific CL terms if label/hint contains a marker gene.
+
+    Tokenises ``label + " " + hint`` on whitespace and [-_/] separators and
+    checks each token against MARKER_GENES.  If a match is found, the
+    candidate dict is filtered to only those CL terms whose name contains the
+    canonical marker string (case-insensitive).  The filter is skipped if
+    fewer than 3 marker-specific candidates would remain, so the LLM is never
+    left with a trivially small or empty set.
+
+    Returns the (possibly filtered) candidates dict.
+    """
+    tokens = set(w.lower() for w in re.split(r'[\s\-_/]+', f"{label} {hint}") if len(w) >= 2)
+    for token in tokens:
+        canonical = MARKER_GENES.get(token)
+        if canonical:
+            filtered = {cl_id: name for cl_id, name in candidates.items()
+                        if canonical in name.lower()}
+            if len(filtered) >= 1:
+                return filtered
+    return candidates
+
+
+def build_keyword_expansion(cl_names, synonym_to_id):
+    """Build a word-level keyword expansion map from OBO synonyms.
+
+    For each synonym phrase, maps each word in that phrase to the canonical
+    words of the corresponding CL term name.  This allows _filter_candidate_terms
+    to expand author-label keywords (e.g. "excitatory") into ontology vocabulary
+    (e.g. "glutamatergic") so the right candidate terms surface for the LLM.
+
+    Returns:
+        dict {word: set_of_canonical_words} — only entries where the synonym
+        word differs from the canonical term's vocabulary are included.
+    """
+    expansion = {}
+    for syn_phrase, cl_id in synonym_to_id.items():
+        canonical = cl_names.get(cl_id, '')
+        if not canonical:
+            continue
+        syn_words = set(w.lower() for w in re.split(r'[\s\-_/]+', syn_phrase) if len(w) >= 2)
+        can_words = set(w.lower() for w in re.split(r'[\s\-_/]+', canonical) if len(w) >= 2)
+        for w in syn_words - can_words:
+            expansion.setdefault(w, set()).update(can_words)
+    return expansion
+
+
+def _filter_candidate_terms(label, cl_names, max_candidates=100, expansion=None, parent_subtree=None):
     """Select a focused subset of CL terms relevant to a label.
 
-    Extracts keywords from the label and filters CL terms that share
-    at least one keyword. Falls back to the full dict if no keywords match.
+    Extracts keywords from the label, optionally expands them via the OBO
+    synonym expansion map, scores CL terms by keyword overlap, and returns
+    the top max_candidates by score. Falls back to a capped sample of the
+    full dict if no keywords match.
     """
     # Extract keywords (2+ chars, lowercased, skip common stop words)
     stop = {'of', 'the', 'and', 'or', 'in', 'to', 'a', 'an', 'by', 'is',
-            'at', 'on', 'for', 'from', 'with', 'derived', 'type'}
+            'at', 'on', 'for', 'from', 'with', 'derived', 'type', 'cell'}
     words = set(w.lower() for w in re.split(r'[\s\-_/]+', label)
                 if len(w) >= 2 and w.lower() not in stop)
 
     if not words:
-        return cl_names
+        return dict(list(cl_names.items())[:max_candidates])
 
-    # Score each CL term by how many keywords it shares with the label
+    # Score each CL term by how many original keywords it shares with the label.
+    # Original-keyword matches are always included (anchor set) so that expansion
+    # cannot crowd out direct matches (e.g. "astrocyte" for "Astrocyte-Immature").
+    original_words = words
     scored = {}
     for cl_id, name in cl_names.items():
         name_words = set(w.lower() for w in re.split(r'[\s\-_/]+', name))
-        overlap = len(words & name_words)
+        overlap = len(original_words & name_words)
         if overlap > 0:
-            scored[cl_id] = name
+            scored[cl_id] = (name, overlap)
 
     if len(scored) < 5:
         # Too few matches — broaden: include partial substring matches
@@ -203,100 +663,270 @@ def _filter_candidate_terms(label, cl_names, max_candidates=200):
             if cl_id in scored:
                 continue
             name_lower = name.lower()
-            if any(w in name_lower for w in words):
-                scored[cl_id] = name
-            if len(scored) >= max_candidates:
-                break
+            if any(w in name_lower for w in original_words):
+                scored[cl_id] = (name, 0.5)
 
-    return scored if scored else cl_names
+    # Anchor set: all terms matching original keywords (guaranteed inclusion)
+    anchor_ids = set(scored.keys())
+
+    # Expand keywords using OBO synonym map (e.g. "excitatory" → "glutamatergic")
+    # and score additional terms, but only fill slots not taken by anchors.
+    if expansion:
+        extra_words = set()
+        for w in original_words:
+            if w in expansion:
+                extra_words.update(expansion[w] - stop)
+        if extra_words:
+            expanded_words = original_words | extra_words
+            for cl_id, name in cl_names.items():
+                if cl_id in scored:
+                    continue
+                name_words = set(w.lower() for w in re.split(r'[\s\-_/]+', name))
+                overlap = len(expanded_words & name_words)
+                if overlap > 0:
+                    scored[cl_id] = (name, overlap * 0.9)  # slightly lower priority than anchors
+
+    # Apply parent subtree boost: terms within the parent's ontology subtree get
+    # a 2x score multiplier so they rank above same-scoring out-of-lineage terms.
+    if parent_subtree:
+        scored = {
+            cl_id: (name, score * 2.0 if cl_id in parent_subtree else score)
+            for cl_id, (name, score) in scored.items()
+        }
+
+    # Return top max_candidates: anchors first, then expansion terms by score
+    anchor_top = sorted(
+        ((cl_id, data) for cl_id, data in scored.items() if cl_id in anchor_ids),
+        key=lambda x: x[1][1], reverse=True
+    )[:max_candidates]
+    remaining_slots = max_candidates - len(anchor_top)
+    expansion_top = sorted(
+        ((cl_id, data) for cl_id, data in scored.items() if cl_id not in anchor_ids),
+        key=lambda x: x[1][1], reverse=True
+    )[:remaining_slots]
+
+    combined = {cl_id: name for cl_id, (name, _) in anchor_top + expansion_top}
+    return combined if combined else dict(list(cl_names.items())[:max_candidates])
 
 
-def _resolve_with_llm(unresolved_labels, cl_names):
+def _apply_voting(label, results, cl_names, resolved, method_prefix, G=None):
+    """Apply consensus/preference voting and store result in resolved dict.
+
+    When both LLMs return different CL terms, checks if one is an ontology
+    ancestor of the other — if so, the more specific (child) term wins
+    regardless of which LLM provided it.  Falls back to Claude on disagreement
+    when neither answer is a descendant of the other.
+
+    Prints the outcome. method_prefix is 'llm' or 'llm_ancestor'.
+    """
+    if len(results) == 2 and results.get('claude') == results.get('gemini'):
+        cl_id = results['claude']
+        cl_name = cl_names.get(cl_id, '')
+        resolved[label] = (cl_id, cl_name, f'{method_prefix}_consensus' if method_prefix == 'llm' else method_prefix)
+        print(f" {cl_id} ({cl_name}) [consensus]")
+    elif len(results) == 2:
+        claude_id = results['claude']
+        gemini_id = results['gemini']
+        winner, winner_api = claude_id, 'claude'
+
+        # If one answer is an ontology ancestor of the other, pick the child (more specific).
+        if G is not None:
+            try:
+                import networkx as nx
+                # In this graph edges go parent→child, so nx.ancestors(G, node)
+                # returns subtypes (children) of node, not supertypes.
+                # claude_id in nx.ancestors(G, gemini_id) means Claude is a subtype
+                # of Gemini → Claude is more specific → keep Claude.
+                # gemini_id in nx.ancestors(G, claude_id) means Gemini is a subtype
+                # of Claude → Gemini is more specific → use Gemini.
+                claude_subtypes = set(nx.ancestors(G, claude_id))
+                gemini_subtypes = set(nx.ancestors(G, gemini_id))
+                if gemini_id in claude_subtypes:
+                    # Gemini is a subtype of Claude → Gemini is more specific
+                    winner, winner_api = gemini_id, 'gemini'
+                elif claude_id in gemini_subtypes:
+                    # Claude is a subtype of Gemini → Claude is more specific
+                    pass  # keep claude
+            except Exception:
+                pass  # fall back to Claude on graph errors
+
+        cl_name = cl_names.get(winner, '')
+        loser_id = gemini_id if winner_api == 'claude' else claude_id
+        loser_name = cl_names.get(loser_id, '')
+        loser_api = 'gemini' if winner_api == 'claude' else 'claude'
+        method = f'{method_prefix}_{winner_api}' if method_prefix == 'llm' else method_prefix
+        resolved[label] = (winner, cl_name, method)
+        print(f" {winner} ({cl_name}) [{winner_api}] vs {loser_id} ({loser_name}) [{loser_api}] — using {winner_api}")
+    elif results:
+        api_used = 'claude' if 'claude' in results else 'gemini'
+        cl_id = results[api_used]
+        cl_name = cl_names.get(cl_id, '')
+        resolved[label] = (cl_id, cl_name, f'{method_prefix}_{api_used}' if method_prefix == 'llm' else method_prefix)
+        print(f" {cl_id} ({cl_name}) [{api_used}]")
+    else:
+        print(" NONE")
+
+
+def _resolve_with_llm(unresolved_labels, cl_names, paper_context=None, label_hints=None, expansion=None, label_to_parent_subtree=None, G=None):
     """Attempt LLM resolution for a list of unresolved labels.
 
-    Tries Claude first (ANTHROPIC_API_KEY), then OpenAI (OPENAI_API_KEY).
+    Tries Claude first (ANTHROPIC_API_KEY), then Gemini (GOOGLE_API_KEY).
     Returns dict {label: (cl_id, cl_name, method)} for successfully resolved labels.
     """
     has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
-    has_openai = bool(os.environ.get('OPENAI_API_KEY'))
+    has_gemini = bool(os.environ.get('GOOGLE_API_KEY'))
 
-    if not has_anthropic and not has_openai:
-        print("\n  Error: --use-llm requires ANTHROPIC_API_KEY or OPENAI_API_KEY")
+    if not has_anthropic and not has_gemini:
+        print("\n  Error: ANTHROPIC_API_KEY or GOOGLE_API_KEY is required")
         print("  Set one of these environment variables:")
         print("    export ANTHROPIC_API_KEY=sk-ant-...")
-        print("    export OPENAI_API_KEY=sk-...")
+        print("    export GOOGLE_API_KEY=sk-...")
         return {}
 
     apis = []
     if has_anthropic:
         apis.append('claude')
-    if has_openai:
-        apis.append('openai')
-    print(f"\n  LLM resolution using: {', '.join(apis)}")
+    if has_gemini:
+        apis.append('gemini')
+    print(f"\n  LLM CL term resolution using: {', '.join(apis)}")
 
     resolved = {}
     for label in unresolved_labels:
-        candidates = _filter_candidate_terms(label, cl_names)
+        hint = label_hints.get(label, label) if label_hints else label
+        query = f"{label} {hint}" if hint != label else label
+        parent_subtree = label_to_parent_subtree.get(label) if label_to_parent_subtree else None
+        # Apply marker filter to full cl_names first so marker-specific terms are
+        # never crowded out of the top-100 candidate cut by unrelated high-scoring terms.
+        pool = _apply_marker_filter(cl_names, label, hint)
+        candidates = _filter_candidate_terms(query, pool, expansion=expansion, parent_subtree=parent_subtree)
         print(f"    \"{label}\" ({len(candidates)} candidate terms)...", end="", flush=True)
 
         results = {}
-        for api in apis:
-            cl_id = query_llm_mapping(label, candidates, api=api)
-            if cl_id:
+        for api in list(apis):
+            try:
+                cl_id = query_llm_mapping(label, candidates, api=api,
+                                          paper_context=paper_context)
+            except FatalAPIError as e:
+                print(f"\n  {e} — disabling {api} for remaining labels")
+                apis.remove(api)
+                continue
+            if cl_id == 'NONE':
+                print(f" [{api}: no match]", end="", flush=True)
+                continue  # explicit NONE — don't add to results
+            if cl_id and cl_id != 'CL:0000000':
                 results[api] = cl_id
 
-        if len(results) == 2 and results.get('claude') == results.get('openai'):
-            # Both agree — auto-accept
-            cl_id = results['claude']
-            cl_name = cl_names.get(cl_id, '')
-            resolved[label] = (cl_id, cl_name, 'llm_consensus')
-            print(f" {cl_id} ({cl_name}) [consensus]")
-        elif results:
-            # Take whatever we got (prefer Claude if only one)
-            api_used = 'claude' if 'claude' in results else 'openai'
-            cl_id = results[api_used]
-            cl_name = cl_names.get(cl_id, '')
-            resolved[label] = (cl_id, cl_name, f'llm_{api_used}')
-            print(f" {cl_id} ({cl_name}) [{api_used}]")
-        else:
-            print(" NONE")
+        _apply_voting(label, results, cl_names, resolved, method_prefix='llm', G=G)
+
+    # Ancestor fallback: for labels still unresolved, try closest parent CL term
+    still_unresolved = [l for l in unresolved_labels if l not in resolved]
+    if still_unresolved:
+        print(f"\n  Ancestor fallback for {len(still_unresolved)} labels...")
+        for label in still_unresolved:
+            # Use plain English cell label as query for better candidate filtering
+            hint = label_hints.get(label, label) if label_hints else label
+            query = f"{label} {hint}" if hint != label else label
+            parent_subtree = label_to_parent_subtree.get(label) if label_to_parent_subtree else None
+            pool = _apply_marker_filter(cl_names, label, hint)
+            candidates = _filter_candidate_terms(query, pool, expansion=expansion, parent_subtree=parent_subtree)
+            print(f"    \"{label}\" → \"{hint[:50]}\" ({len(candidates)} candidate terms)...", end="", flush=True)
+
+            results = {}
+            claude_vetoed = False
+            for api in list(apis):
+                try:
+                    cl_id = query_llm_ancestor(label, candidates, api=api,
+                                               paper_context=paper_context)
+                except FatalAPIError as e:
+                    print(f"\n  {e} — disabling {api} for remaining labels")
+                    apis.remove(api)
+                    continue
+                if cl_id == 'NONE':
+                    if api == 'claude':
+                        claude_vetoed = True
+                        print(f" [claude: no ancestor]", end="", flush=True)
+                    else:
+                        print(f" [gemini: no ancestor]", end="", flush=True)
+                    continue
+                if cl_id:
+                    if api == 'gemini' and claude_vetoed:
+                        print(f" [claude vetoed gemini ancestor {cl_id} ({cl_names.get(cl_id, '?')})]", end="", flush=True)
+                        continue  # Claude vetoed — ignore gemini's answer
+                    results[api] = cl_id
+
+            _apply_voting(label, results, cl_names, resolved, method_prefix='llm_ancestor', G=G)
 
     return resolved
 
 
-def generate_remap(df, column, obo_path, use_llm=False):
+def generate_remap(df, column, obo_path, paper_context=None):
     """Generate a remap table from a column of labels.
 
     Args:
         df: DataFrame with the annotation column.
         column: Column name to remap.
         obo_path: Path to OBO file.
-        use_llm: If True, use LLM to resolve unmatched labels.
+        paper_context: Optional paper title/abstract for LLM context.
 
     Returns:
         Tuple of (remap_df, summary_report).
     """
     cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id = \
         build_label_mapping(obo_path)
+    keyword_expansion = build_keyword_expansion(cl_names, synonym_to_id)
 
     unique_labels = sorted(set(
         str(v).strip() for v in df[column]
         if pd.notna(v) and str(v).strip()
     ))
 
+    # Build cellxgene lookup: author label -> (cell_type values, cell_type_ontology_term_id values)
+    has_cellxgene = 'cell_type' in df.columns and 'cell_type_ontology_term_id' in df.columns
+    cellxgene_lookup = {}
+    if has_cellxgene:
+        for label, grp in df.groupby(column):
+            label = str(label).strip()
+            types = sorted(grp['cell_type'].dropna().astype(str).unique())
+            ids = sorted(grp['cell_type_ontology_term_id'].dropna().astype(str).unique())
+            cellxgene_lookup[label] = (' | '.join(types), ' | '.join(ids))
+
+    _UNINFORMATIVE_LABELS = re.compile(
+        r'^(unknown|unassigned|unannotated|other|na|n/a|none|ambiguous|doublet|'
+        r'low quality|low_quality|noise|artifact|mixed|undefined)s?$',
+        re.IGNORECASE
+    )
+
+    print(f"\nRunning exact/synonym/fuzzy cascade on {len(unique_labels)} unique labels...")
     rows = []
     unresolved_labels = []
     method_counts = {'exact': 0, 'synonym': 0, 'fuzzy': 0, 'fuzzy_synonym': 0,
                      'already_cl': 0, 'llm_consensus': 0, 'llm_claude': 0,
-                     'llm_openai': 0, 'unresolved': 0}
+                     'llm_gemini': 0, 'llm_ancestor': 0, 'no_cl_term_found': 0}
 
     for label in unique_labels:
+        cxg_type, cxg_id = cellxgene_lookup.get(label, ('', ''))
+        if _UNINFORMATIVE_LABELS.match(label):
+            rows.append({
+                'original_label': label,
+                'cl_term_id': '',
+                'cl_term_name': '',
+                'cl_term_match_method': 'no_cl_term_found',
+                'cellxgene_cell_type': cxg_type,
+                'cellxgene_cell_type_ontology_term_id': cxg_id,
+                'cell_label': label,
+                'cell_label_method': 'original',
+            })
+            method_counts['no_cl_term_found'] += 1
+            continue
         if _is_cl_id(label):
             rows.append({
                 'original_label': label,
                 'cl_term_id': label,
                 'cl_term_name': cl_names.get(label, ''),
-                'match_method': 'already_cl',
+                'cl_term_match_method': 'already_cl',
+
+                'cellxgene_cell_type': cxg_type,
+                'cellxgene_cell_type_ontology_term_id': cxg_id,
             })
             method_counts['already_cl'] += 1
             continue
@@ -310,26 +940,153 @@ def generate_remap(df, column, obo_path, use_llm=False):
                 'original_label': label,
                 'cl_term_id': cl_id,
                 'cl_term_name': canon_name,
-                'match_method': method,
+                'cl_term_match_method': method,
+
+                'cellxgene_cell_type': cxg_type,
+                'cellxgene_cell_type_ontology_term_id': cxg_id,
             })
             method_counts[method] += 1
+            print(f"  [{method}] \"{label}\" → {cl_id} ({canon_name})")
         else:
             unresolved_labels.append(label)
 
-    # LLM pass for unresolved labels
+    # Pre-generate plain English cell labels for unresolved labels.
+    # These are used both as candidate-filter hints in the ancestor pass
+    # and as the final cell_label values — avoiding double LLM calls.
+
+    # Parse glossary into a lookup dict {lowercase_label: plain_english_name}
+    glossary_lookup = {}
+    if paper_context:
+        for line in paper_context.splitlines():
+            if ':' in line:
+                key, _, val = line.partition(':')
+                key = key.strip().lower()
+                key = re.sub(r'[\u2013\u2014\u2012]', '-', key)  # normalize dashes
+                val = val.strip()
+                if key and val:
+                    glossary_lookup[key] = val
+
+    label_hints = {}       # {label: plain_english_name}
+    label_hint_method = {} # {label: 'glossary'|'llm'|'original'}
+    if unresolved_labels:
+        label_api = 'claude' if os.environ.get('ANTHROPIC_API_KEY') else \
+                    'gemini' if os.environ.get('GOOGLE_API_KEY') else None
+        print(f"\n  Generating cell labels for {len(unresolved_labels)} unresolved labels (via {label_api})...")
+        for lbl in unresolved_labels:
+            print(f"    \"{lbl}\"...", end="", flush=True)
+            # Check glossary first before calling LLM.
+            # Normalize dashes (em-dash, en-dash → hyphen) to handle LLM formatting
+            # variation in extracted glossary keys, then also try plural forms.
+            lbl_lower = lbl.lower()
+            lbl_norm = re.sub(r'[\u2013\u2014\u2012]', '-', lbl_lower)
+            glossary_hit = (glossary_lookup.get(lbl_lower)
+                            or glossary_lookup.get(lbl_norm)
+                            or glossary_lookup.get(lbl_lower + 's')
+                            or glossary_lookup.get(lbl_lower.rstrip('s')))
+            if glossary_hit:
+                label_hints[lbl] = glossary_hit
+                label_hint_method[lbl] = 'glossary'
+                print(f" {glossary_hit[:60]} [glossary]")
+                continue
+            try:
+                desc = query_llm_label(lbl, api=label_api, paper_context=paper_context) if label_api else None
+            except FatalAPIError:
+                desc = None
+            if desc and desc != lbl:
+                label_hints[lbl] = desc
+                label_hint_method[lbl] = 'llm'
+            else:
+                label_hints[lbl] = lbl
+                label_hint_method[lbl] = 'original'
+            print(f" {label_hints[lbl][:60]}")
+
+    # Build parent subtree map for boosting candidate scoring.
+    # For each unresolved child label, resolve its parent label (exact/synonym/fuzzy)
+    # and precompute the parent's ontology subtree for use in _filter_candidate_terms.
+    label_to_parent_subtree = {}
+    G = None
+    cellxgene_cols = _get_cellxgene_cols(df)
+    parent_cols = detect_parent_columns(df, column, exclude_cols=cellxgene_cols)
+    if parent_cols and unresolved_labels:
+        from ontology_utils import load_ontology
+        import networkx as nx
+        G = load_ontology(obo_path)
+        # Build per-column lookup: child_label -> parent_val for each parent column
+        col_lookups = []
+        for parent_col, _ in parent_cols:
+            lookup = (
+                df[[column, parent_col]].drop_duplicates()
+                .set_index(column)[parent_col].to_dict()
+            )
+            col_lookups.append(lookup)
+
+        parent_subtree_cache = {}
+        for label in unresolved_labels:
+            # Try each parent level in order (most specific first) until one resolves.
+            # This handles cases where the immediate parent label is the same as the
+            # child (e.g. IPC-EN -> Subclass "IPC-EN" -> unresolvable) by falling
+            # through to the next level (e.g. Class "Progenitor").
+            subtree = None
+            for lookup in col_lookups:
+                parent_val = str(lookup.get(label, '')).strip()
+                if not parent_val or parent_val == label:
+                    continue  # same label or missing — try next level
+                if parent_val not in parent_subtree_cache:
+                    parent_cl_id, _, _ = resolve_name(
+                        parent_val, name_to_id, synonym_to_id,
+                        fuzzy_name_to_id, fuzzy_synonym_to_id, cl_names)
+                    if parent_cl_id:
+                        try:
+                            parent_subtree_cache[parent_val] = (
+                                set(nx.ancestors(G, parent_cl_id)) | {parent_cl_id}
+                            )
+                        except nx.NodeNotFound:
+                            parent_subtree_cache[parent_val] = None
+                    else:
+                        parent_subtree_cache[parent_val] = None
+                subtree = parent_subtree_cache.get(parent_val)
+                if subtree:
+                    break  # found a usable parent subtree
+            if subtree:
+                label_to_parent_subtree[label] = subtree
+
+    # LLM pass for unresolved labels — uses label_hints for ancestor candidate filtering
     llm_resolved = {}
-    if use_llm and unresolved_labels:
+    if unresolved_labels:
         print(f"\n  {len(unresolved_labels)} labels unresolved — trying LLM...")
-        llm_resolved = _resolve_with_llm(unresolved_labels, cl_names)
+        llm_resolved = _resolve_with_llm(unresolved_labels, cl_names,
+                                         paper_context=paper_context,
+                                         label_hints=label_hints,
+                                         expansion=keyword_expansion,
+                                         label_to_parent_subtree=label_to_parent_subtree or None,
+                                         G=G)
+
+    # De-specify any species-specific LLM results (e.g. "(Mus musculus)" terms).
+    # If the resolved term has a species qualifier, replace it with the nearest
+    # species-agnostic is_a ancestor.
+    if llm_resolved:
+        despecify_G = G
+        for label, (cl_id, cl_name, method) in list(llm_resolved.items()):
+            if _SPECIES_QUALIFIER.search(cl_name):
+                if despecify_G is None:
+                    from ontology_utils import load_ontology
+                    despecify_G = load_ontology(obo_path)
+                new_id, new_name = _despecify_cl_term(cl_id, cl_names, despecify_G)
+                if new_id != cl_id:
+                    print(f"    De-specified \"{label}\": {cl_id} ({cl_name}) → {new_id} ({new_name})")
+                    llm_resolved[label] = (new_id, new_name, method)
 
     for label in unresolved_labels:
+        cxg_type, cxg_id = cellxgene_lookup.get(label, ('', ''))
         if label in llm_resolved:
             cl_id, cl_name, method = llm_resolved[label]
             rows.append({
                 'original_label': label,
                 'cl_term_id': cl_id,
                 'cl_term_name': cl_name,
-                'match_method': method,
+                'cl_term_match_method': method,
+                'cellxgene_cell_type': cxg_type,
+                'cellxgene_cell_type_ontology_term_id': cxg_id,
             })
             method_counts[method] += 1
         else:
@@ -337,33 +1094,58 @@ def generate_remap(df, column, obo_path, use_llm=False):
                 'original_label': label,
                 'cl_term_id': '',
                 'cl_term_name': '',
-                'match_method': 'unresolved',
+                'cl_term_match_method': 'no_cl_term_found',
+                'cellxgene_cell_type': cxg_type,
+                'cellxgene_cell_type_ontology_term_id': cxg_id,
             })
-            method_counts['unresolved'] += 1
+            method_counts['no_cl_term_found'] += 1
 
-    remap_df = pd.DataFrame(rows)
+    # Populate cell_label for every row.
+    # Priority: (1) CL term name for exact matches, (2) pre-generated LLM label
+    # for llm_ancestor and no_cl_term_found (preserves specificity), (3) original label.
+    _EXACT_METHODS = {'already_cl', 'exact', 'synonym', 'fuzzy', 'fuzzy_synonym',
+                      'llm_consensus', 'llm_claude', 'llm_gemini'}
+    for row in rows:
+        if row['cl_term_match_method'] in _EXACT_METHODS:
+            row['cell_label'] = row['cl_term_name']
+            row['cell_label_method'] = 'cl_term_name'
+        else:
+            lbl = row['original_label']
+            row['cell_label'] = label_hints.get(lbl) or lbl
+            row['cell_label_method'] = label_hint_method.get(lbl, 'original')
+
+    remap_df = pd.DataFrame(rows, columns=[
+        'original_label', 'cell_label', 'cell_label_method', 'cl_term_id', 'cl_term_name',
+        'cl_term_match_method', 'cellxgene_cell_type', 'cellxgene_cell_type_ontology_term_id',
+    ]).rename(columns={
+        'cell_label':          'mapped_cell_label',
+        'cell_label_method':   'mapped_cell_label_method',
+        'cl_term_id':          'mapped_cell_label_ontology_term_id',
+        'cl_term_name':        'mapped_cell_label_ontology_term_name',
+        'cl_term_match_method':'mapped_cell_label_ontology_term_match_method',
+    })
 
     total = len(unique_labels)
-    resolved = total - method_counts['unresolved']
+    resolved = total - method_counts['no_cl_term_found']
     lines = [
         f"Remap summary for column '{column}':",
         f"  Total unique labels: {total}",
         f"  Resolved:            {resolved} ({resolved/max(total,1):.0%})",
     ]
     for m in ('exact', 'synonym', 'fuzzy', 'fuzzy_synonym', 'already_cl',
-              'llm_consensus', 'llm_claude', 'llm_openai'):
+              'llm_consensus', 'llm_claude', 'llm_gemini', 'llm_ancestor'):
         if method_counts[m]:
             lines.append(f"    {m}: {method_counts[m]}")
-    if method_counts['unresolved']:
-        lines.append(f"  Unresolved:          {method_counts['unresolved']}")
-        still_unresolved = [r['original_label'] for r in rows if r['match_method'] == 'unresolved']
+    if method_counts['no_cl_term_found']:
+        lines.append(f"  Unresolved:          {method_counts['no_cl_term_found']}")
+        still_unresolved = [r['original_label'] for r in rows if r['cl_term_match_method'] == 'no_cl_term_found']
         for name in still_unresolved:
             lines.append(f"    - \"{name}\"")
 
     return remap_df, '\n'.join(lines)
 
 
-def detect_parent_columns(df, child_col):
+def detect_parent_columns(df, child_col, exclude_cols=None):
     """Find columns that are valid hierarchical parents of child_col.
 
     A column P is a parent of C if every unique value in C maps to exactly
@@ -373,32 +1155,81 @@ def detect_parent_columns(df, child_col):
     Returns:
         List of (parent_col, n_unique) sorted from coarsest to finest.
     """
-    child_values = df[[child_col]].copy()
-    child_values['_child'] = df[child_col].astype(str).str.strip()
-    child_nunique = child_values['_child'].nunique()
+    child_nunique = df[child_col].nunique()
+    exclude_cols = exclude_cols or set()
 
     parents = []
     for col in df.columns:
-        if col == child_col:
+        if col == child_col or col in exclude_cols:
             continue
-        # Skip numeric / high-cardinality / low-cardinality columns
         vals = df[col].dropna()
         if len(vals) == 0:
             continue
+        if _is_metadata_column(col, vals.tolist()):
+            continue
         col_nunique = vals.nunique()
-        # Parent must be coarser (fewer unique values)
         if col_nunique >= child_nunique or col_nunique < 2:
             continue
-
-        # Check functional dependency: each child value maps to exactly one parent
         pairs = df[[child_col, col]].dropna()
         grouped = pairs.groupby(child_col)[col].nunique()
         if (grouped == 1).all():
             parents.append((col, col_nunique))
 
-    # Sort coarsest first
     parents.sort(key=lambda x: x[1])
     return parents
+
+
+def detect_child_columns(df, parent_col):
+    """Find columns that are valid hierarchical children of parent_col.
+
+    A column C is a child of P if every unique value in C maps to exactly
+    one value in P (functional dependency C -> P), and C has more unique
+    values than P (finer granularity).
+
+    Returns:
+        List of (child_col, n_unique) sorted from finest to coarsest.
+    """
+    parent_nunique = df[parent_col].nunique()
+
+    children = []
+    for col in df.columns:
+        if col == parent_col:
+            continue
+        vals = df[col].dropna()
+        if len(vals) == 0:
+            continue
+        if _is_metadata_column(col, vals.tolist()):
+            continue
+        col_nunique = vals.nunique()
+        if col_nunique <= parent_nunique or col_nunique < 2:
+            continue
+        pairs = df[[col, parent_col]].dropna()
+        grouped = pairs.groupby(col)[parent_col].nunique()
+        if (grouped == 1).all():
+            children.append((col, col_nunique))
+
+    children.sort(key=lambda x: x[1])
+    return children
+
+
+def build_hierarchy_string(df, parent_cols, selected_col, child_cols):
+    """Build a full hierarchy display string, e.g. 'Class (6) -> Subclass (12) -> Type/Type_updated (34)'.
+
+    Columns with the same number of unique values are grouped with '/'.
+    """
+    parts = []
+    for col, n in parent_cols:
+        parts.append(f"{col} ({n})")
+    parts.append(f"{selected_col} ({df[selected_col].nunique()})")
+
+    # Group children by n_unique
+    groups = {}
+    for col, n in child_cols:
+        groups.setdefault(n, []).append(col)
+    for n in sorted(groups):
+        parts.append(f"{'/'.join(groups[n])} ({n})")
+
+    return ' -> '.join(parts)
 
 
 def check_hierarchy_consistency(df, child_col, remap_dict, parent_cols, obo_path):
@@ -414,7 +1245,8 @@ def check_hierarchy_consistency(df, child_col, remap_dict, parent_cols, obo_path
     from ontology_utils import load_ontology, precompute_ic
     import networkx as nx
 
-    cl_names = parse_obo_names(obo_path)
+    cl_names, name_to_id, synonym_to_id, fuzzy_name_to_id, fuzzy_synonym_to_id = \
+        build_label_mapping(obo_path)
     G = load_ontology(obo_path)
     ic_values = precompute_ic(G, k=0.5)
 
@@ -477,12 +1309,44 @@ def check_hierarchy_consistency(df, child_col, remap_dict, parent_cols, obo_path
             else:
                 status = "weak — common ancestor is very generic"
 
+            # Validate MICA against the resolved parent label; also build subtree
+            # for per-term violation flagging below.
+            parent_subtree = set()
+            parent_cl_id, _, _ = resolve_name(
+                parent_val, name_to_id, synonym_to_id,
+                fuzzy_name_to_id, fuzzy_synonym_to_id, cl_names)
+            if parent_cl_id:
+                try:
+                    parent_subtree = set(nx.ancestors(G, parent_cl_id)) | {parent_cl_id}
+                    mica_ancestors = set(nx.descendants(G, mica_id)) | {mica_id}
+                    if parent_cl_id not in mica_ancestors:
+                        parent_cl_name = cl_names.get(parent_cl_id, '?')
+                        status += (f"; WARNING — MICA is not under parent label "
+                                   f"{parent_cl_id} ({parent_cl_name})")
+                except nx.NodeNotFound:
+                    pass
+
+            # Determine per-term violations before printing
+            term_violations = {
+                cl_id: (parent_subtree and cl_id not in parent_subtree)
+                for cl_id in label_to_cl.values()
+            }
+            any_violations = any(term_violations.values())
+
+            # Suppress "MICA not under parent" warning when all terms are actually
+            # under the parent (false positive from multiple inheritance paths).
+            if not any_violations and 'MICA is not under parent label' in status:
+                status = status.replace(
+                    status[status.index('; WARNING — MICA is not under parent label'):], ''
+                )
+
             n_cl = len(unique_cl)
-            lines.append(f"  {parent_val} ({n_cl} CL term{'s' if n_cl != 1 else ''}): "
-                         f"MICA = {mica_id} ({mica_name}, IC={mica_ic:.3f}) — {status}")
-            for label, cl_id in sorted(label_to_cl.items()):
-                marker = " *" if cl_id == mica_id else ""
-                lines.append(f"    {label} -> {cl_id} ({cl_names.get(cl_id, '?')}){marker}")
+            if 'WARNING' in status:
+                lines.append(f"  {parent_val} ({n_cl} CL term{'s' if n_cl != 1 else ''}): "
+                             f"MICA = {mica_id} ({mica_name}, IC={mica_ic:.3f}) — {status}")
+                for label, cl_id in sorted(label_to_cl.items()):
+                    marker = " [!]" if term_violations.get(cl_id) else ""
+                    lines.append(f"    {label} -> {cl_id} ({cl_names.get(cl_id, '?')}){marker}")
 
     return '\n'.join(lines)
 
@@ -490,6 +1354,45 @@ def check_hierarchy_consistency(df, child_col, remap_dict, parent_cols, obo_path
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    # Validate LLM API keys early before any processing
+    has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
+    has_gemini = bool(os.environ.get('GOOGLE_API_KEY'))
+    if not has_anthropic and not has_gemini:
+        print("Error: ANTHROPIC_API_KEY or GOOGLE_API_KEY is required.")
+        print("  export ANTHROPIC_API_KEY=sk-ant-...")
+        print("  export GOOGLE_API_KEY=sk-...")
+        sys.exit(1)
+
+    # Fetch paper context — PDF takes priority over DOI
+    paper_context = None
+    if args.pdf:
+        print(f"\nExtracting cell type glossary from PDF: {args.pdf}...")
+        pdf_text = extract_pdf_text(args.pdf)
+        if pdf_text:
+            # Prefer Gemini for glossary extraction — large input, saves Claude TPM quota
+            llm_api = 'gemini' if os.environ.get('GOOGLE_API_KEY') else \
+                      'claude' if os.environ.get('ANTHROPIC_API_KEY') else None
+            if llm_api:
+                paper_context = extract_cell_type_glossary(pdf_text, api=llm_api)
+                if paper_context:
+                    lines = paper_context.splitlines()
+                    print(f"  Glossary extracted ({len(lines)} entries):")
+                    for entry in lines:
+                        print(f"    {entry}")
+                else:
+                    print("  Glossary extraction failed — proceeding without it.")
+            else:
+                print("  Skipping glossary extraction (no LLM API key).")
+        else:
+            print("  Could not read PDF — proceeding without it.")
+    elif args.doi:
+        print(f"\nFetching paper context for DOI: {args.doi}...")
+        paper_context = fetch_doi_context(args.doi)
+        if paper_context:
+            print(f"  {paper_context[:120]}...")
+        else:
+            print("  Could not retrieve context — proceeding without it.")
 
     # Load input
     print(f"Loading {args.input}...")
@@ -505,19 +1408,26 @@ def main():
         selected_col = args.column
         print(f"  Using column '{selected_col}' (user-specified)")
     else:
-        print(f"\nAuto-detecting best annotation column (min resolvability: {args.min_score:.0%})...")
-        selected_col, detect_report = detect_best_column(df, args.obo, args.min_score)
+        print(f"\nAuto-detecting annotation column hierarchy...")
+        selected_col, detect_report = detect_leaf_column(df)
         print(detect_report)
         if selected_col is None:
             print("\nError: No suitable annotation column found.")
             print(f"  Available columns: {list(df.columns)}")
             print("  Use --column to specify one explicitly.")
             sys.exit(1)
-        print(f"\n  Selected column: '{selected_col}'")
+
+    # Show full hierarchy with selected column highlighted
+    cellxgene_cols = _get_cellxgene_cols(df)
+    parent_cols = detect_parent_columns(df, selected_col, exclude_cols=cellxgene_cols)
+    child_cols = detect_child_columns(df, selected_col)
+    hierarchy_str = build_hierarchy_string(df, parent_cols, selected_col, child_cols)
+    print(f"\nDetected hierarchy: {hierarchy_str}")
 
     # Generate remap
     print(f"\nResolving labels from '{selected_col}' to CL term IDs...")
-    remap_df, summary = generate_remap(df, selected_col, args.obo, use_llm=args.use_llm)
+    remap_df, summary = generate_remap(df, selected_col, args.obo,
+                                       paper_context=paper_context)
     print(summary)
 
     # Write output
@@ -538,17 +1448,15 @@ def main():
     print(f"\nSaved remap to {args.output}")
     print(f"  Use with: evaluate.py --remap-file {args.output}")
 
-    # Hierarchy consistency check
-    parent_cols = detect_parent_columns(df, selected_col)
+    # Hierarchy consistency check — immediate parent only
     if parent_cols:
-        print(f"\nDetected hierarchical parent columns: "
-              f"{[col for col, _ in parent_cols]}")
-        remap_dict = dict(zip(remap_df['original_label'], remap_df['cl_term_id']))
+        immediate_parent = [parent_cols[-1]]
+        remap_dict = dict(zip(remap_df['original_label'], remap_df['mapped_cell_label_ontology_term_id']))
         report = check_hierarchy_consistency(
-            df, selected_col, remap_dict, parent_cols, args.obo)
+            df, selected_col, remap_dict, immediate_parent, args.obo)
         print(report)
     else:
-        print("\nNo hierarchical parent columns detected — skipping consistency check.")
+        print("No parent columns detected — skipping consistency check.")
 
 
 if __name__ == "__main__":

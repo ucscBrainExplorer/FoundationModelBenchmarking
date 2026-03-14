@@ -16,22 +16,37 @@ def parse_obo_names(obo_path: str) -> dict:
     """
     cl_map = {}
     current_id = None
+    current_name = None
     in_term = False
+    is_obsolete = False
 
     with open(obo_path, 'r') as f:
         for line in f:
             line = line.strip()
             if line == '[Term]':
+                if in_term and current_id and current_name and not is_obsolete:
+                    cl_map[current_id] = current_name
                 in_term = True
                 current_id = None
+                current_name = None
+                is_obsolete = False
             elif line.startswith('[') and line.endswith(']'):
+                if in_term and current_id and current_name and not is_obsolete:
+                    cl_map[current_id] = current_name
                 in_term = False
                 current_id = None
+                current_name = None
+                is_obsolete = False
             elif in_term:
                 if line.startswith('id: '):
                     current_id = line[4:]
                 elif line.startswith('name: ') and current_id:
-                    cl_map[current_id] = line[6:]
+                    current_name = line[6:]
+                elif line == 'is_obsolete: true':
+                    is_obsolete = True
+
+    if in_term and current_id and current_name and not is_obsolete:
+        cl_map[current_id] = current_name
 
     return cl_map
 

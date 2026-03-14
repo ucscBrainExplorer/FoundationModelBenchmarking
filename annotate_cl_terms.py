@@ -17,7 +17,19 @@ import argparse
 import os
 import re
 import sys
+import time
+import warnings
 import pandas as pd
+
+
+class FatalAPIError(Exception):
+    """Raised when an API call fails with an unrecoverable error (e.g. no credits, bad key)."""
+    pass
+
+
+def _is_retryable(err_str):
+    """Return True if the error is transient and worth retrying (e.g. overload, rate limit)."""
+    return any(k in err_str for k in ('529', 'overloaded', 'rate_limit', '429', 'timeout', 'service_unavailable'))
 
 from obo_parser import parse_obo_names
 
@@ -81,13 +93,14 @@ def fuzzy_normalize(name):
     return name
 
 
-def query_llm_mapping(name, cl_terms_subset, api="claude"):
+def query_llm_mapping(name, cl_terms_subset, api="claude", paper_context=None):
     """Query an LLM to map a cell type name to a CL term.
 
     Args:
         name: The unmatched cell type name
         cl_terms_subset: Dict of {CL_id: canonical_name} (candidate terms)
-        api: 'claude' or 'openai'
+        api: 'claude' or 'gemini'
+        paper_context: Optional paper title/abstract to help identify novel cell types.
 
     Returns:
         CL term ID string, or None if the LLM couldn't determine a match
@@ -96,11 +109,37 @@ def query_llm_mapping(name, cl_terms_subset, api="claude"):
     candidates = "\n".join(f"  {cl_id}: {cl_name}"
                            for cl_id, cl_name in sorted(cl_terms_subset.items()))
 
+    context_line = (
+        f"This label comes from the following study: {paper_context}\n"
+        if paper_context else ""
+    )
     prompt = (
         f"Given the cell type name \"{name}\", which Cell Ontology (CL) term "
         f"is the best match from this list?\n\n{candidates}\n\n"
-        f"Reply with ONLY the CL term ID (e.g. CL:0000540) and nothing else. "
-        f"If none is a reasonable match, reply with NONE."
+        f"{context_line}"
+        f"Rules:\n"
+        f"- HARD RULE: If the label contains a marker gene (e.g. VIP, SST, PV, SNCG, "
+        f"LAMP5, PVALB, CCK, NPY, CR, CB), you MUST choose the term that includes that "
+        f"marker gene name. Do NOT choose a broader lineage or origin term (e.g. 'caudal "
+        f"ganglionic eminence derived interneuron') when a marker-specific term (e.g. "
+        f"'VIP GABAergic interneuron', 'sst GABAergic interneuron') is available in the "
+        f"candidate list. The marker gene takes priority over lineage origin.\n"
+        f"- HARD RULE: If the label or description contains a distinctive biological word "
+        f"(e.g. 'tripotential', 'corticothalamic', 'intratelencephalic') that appears "
+        f"verbatim in a candidate term's name, strongly prefer that term over a generic "
+        f"alternative (e.g. 'neural progenitor cell', 'neuron').\n"
+        f"- Prefer the most specific term that captures ALL meaningful parts of the label "
+        f"(e.g. cell class, brain region, maturity state, origin).\n"
+        f"- Do NOT choose a generic term (e.g. 'neuron', 'immature neuron') if the label "
+        f"encodes additional specificity that the generic term ignores.\n"
+        f"- Do NOT choose a term that adds specificity absent from the label. "
+        f"For example, if the label says 'IT neuron' without mentioning a layer, "
+        f"do NOT pick 'L2/3 IT neuron' or 'L5 IT neuron' — reply NONE instead and let the "
+        f"ancestor fallback find the right parent term.\n"
+        f"- Only select a term if you are confident it is biologically correct.\n"
+        f"- Novel or recently described cell types may not have a CL term — reply NONE.\n"
+        f"- If no term captures the full specificity of the label, reply NONE.\n"
+        f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
     )
 
     try:
@@ -108,20 +147,16 @@ def query_llm_mapping(name, cl_terms_subset, api="claude"):
             import anthropic
             client = anthropic.Anthropic()
             response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model="claude-sonnet-4-6",
                 max_tokens=50,
                 messages=[{"role": "user", "content": prompt}]
             )
             answer = response.content[0].text.strip()
-        elif api == "openai":
-            import openai
-            client = openai.OpenAI()
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=50,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            answer = response.choices[0].message.content.strip()
+        elif api == "gemini":
+            from google import genai as google_genai
+            client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            answer = ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
         else:
             return None
 
@@ -130,11 +165,194 @@ def query_llm_mapping(name, cl_terms_subset, api="claude"):
         if cl_match and cl_match.group() in cl_terms_subset:
             return cl_match.group()
         if answer.upper() == "NONE":
-            return None
+            return "NONE"  # explicit veto — distinguishable from API failure (None)
         return None
 
     except Exception as e:
+        err_str = str(e).lower()
+        if any(k in err_str for k in ('credit', 'billing', 'unauthorized', 'invalid_api_key', 'permission')):
+            raise FatalAPIError(f"{api} API fatal error: {e}")
+        if _is_retryable(err_str):
+            for attempt in range(2):
+                wait = 5 * (attempt + 1)
+                print(f"    Warning: {api} overloaded, retrying in {wait}s...", end="", flush=True)
+                time.sleep(wait)
+                try:
+                    if api == "claude":
+                        import anthropic
+                        client = anthropic.Anthropic()
+                        response = client.messages.create(
+                            model="claude-sonnet-4-6", max_tokens=50,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        return response.content[0].text.strip()
+                    elif api == "gemini":
+                        from google import genai as google_genai
+                        client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+                        return ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+                except Exception:
+                    pass
         print(f"    Warning: {api} API call failed: {e}")
+        return None
+
+
+def query_llm_ancestor(name, cl_terms_subset, api="claude", paper_context=None):
+    """Query an LLM for the closest ancestor CL term when exact mapping failed.
+
+    Uses a relaxed prompt that accepts less specific terms — dropping maturity
+    state, sub-region, or origin qualifiers — to find the best available
+    ontology anchor.
+
+    Args:
+        name: The unmatched cell type label.
+        cl_terms_subset: Dict of {CL_id: canonical_name} (candidate terms).
+        api: 'claude' or 'gemini'.
+        paper_context: Optional paper context string.
+
+    Returns:
+        CL term ID string, or None if no reasonable ancestor found.
+    """
+    candidates = "\n".join(f"  {cl_id}: {cl_name}"
+                           for cl_id, cl_name in sorted(cl_terms_subset.items()))
+    context_line = (
+        f"This label comes from the following study: {paper_context}\n"
+        if paper_context else ""
+    )
+    prompt = (
+        f"The cell type label \"{name}\" could not be matched to a specific CL term. "
+        f"Find the closest ancestor (parent) CL term from this list that is biologically "
+        f"valid, even if less specific. You may ignore maturity qualifiers (e.g. 'immature', "
+        f"'newborn'), sub-region qualifiers, or origin qualifiers to find the best match. "
+        f"For example, 'immature intratelencephalic excitatory neuron' → "
+        f"'intratelencephalic-projecting glutamatergic cortical neuron'.\n\n"
+        f"{candidates}\n\n"
+        f"{context_line}"
+        f"Rules:\n"
+        f"- Choose the most specific term that is still biologically correct.\n"
+        f"- Do NOT add specificity absent from the label. If the label does not name a "
+        f"specific brain region (e.g. 'primary motor cortex', 'striatum', 'medulla', "
+        f"'L5') or a specific organ (e.g. 'kidney', 'liver', 'lung', 'heart'), "
+        f"do NOT choose a term restricted to that region or organ.\n"
+        f"- Do NOT choose 'cell' or 'neuron' alone — these are too generic.\n"
+        f"- Do NOT choose a mature cell type for a label that indicates a progenitor, "
+        f"precursor, or intermediate progenitor cell (IPC). A progenitor label must map "
+        f"to a progenitor or stem cell CL term, not its downstream progeny.\n"
+        f"- ALWAYS prefer species-agnostic terms over species-specific ones. "
+        f"If a term ending in '(Homo sapiens)', '(Mus musculus)', or any other species "
+        f"name is in the list, check whether a species-agnostic parent term also exists "
+        f"in the list and use that instead. Only use a species-specific term if no "
+        f"species-agnostic equivalent is present in the candidate list.\n"
+        f"- If no reasonable ancestor exists, reply NONE.\n"
+        f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
+    )
+
+    try:
+        if api == "claude":
+            import anthropic
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=50,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            answer = response.content[0].text.strip()
+        elif api == "gemini":
+            from google import genai as google_genai
+            client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            answer = ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+        else:
+            return None
+
+        cl_match = re.search(r'CL:\d+', answer)
+        if cl_match and cl_match.group() in cl_terms_subset:
+            return cl_match.group()
+        if answer.upper() == "NONE":
+            return "NONE"  # explicit veto — distinguishable from API failure (None)
+        return None
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(k in err_str for k in ('credit', 'billing', 'unauthorized', 'invalid_api_key', 'permission')):
+            raise FatalAPIError(f"{api} API fatal error: {e}")
+        if _is_retryable(err_str):
+            for attempt in range(2):
+                wait = 5 * (attempt + 1)
+                print(f"    Warning: {api} overloaded, retrying in {wait}s...", end="", flush=True)
+                time.sleep(wait)
+                try:
+                    if api == "claude":
+                        import anthropic
+                        client = anthropic.Anthropic()
+                        response = client.messages.create(
+                            model="claude-sonnet-4-6", max_tokens=50,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        return response.content[0].text.strip()
+                    elif api == "gemini":
+                        from google import genai as google_genai
+                        client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+                        return ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+                except Exception:
+                    pass
+        print(f"    Warning: {api} API call failed: {e}")
+        return None
+
+
+def query_llm_label(name, api="claude", paper_context=None):
+    """Query an LLM to generate a plain English description of a cell type label.
+
+    Args:
+        name: The cell type label (e.g. 'IN-NCx_dGE-Immature')
+        api: 'claude' or 'gemini'
+        paper_context: Optional title/abstract of the source paper to help decode
+                       novel or dataset-specific labels.
+
+    Returns:
+        Plain English description string, or None on failure.
+    """
+    context_line = (
+        f"The label comes from this study: {paper_context} "
+        if paper_context else ""
+    )
+    prompt = (
+        f"You are an expert in single-cell transcriptomics and cell biology. "
+        f"The following label comes from a scRNA-seq dataset and may use abbreviated "
+        f"or shorthand nomenclature common in neuroscience or developmental biology "
+        f"(e.g. 'RG-oRG' = outer radial glial cell, 'EN-L2_3-IT' = excitatory "
+        f"intratelencephalic neuron of cortical layer 2/3, 'IN-dLGE' = inhibitory "
+        f"neuron from dorsal lateral ganglionic eminence). "
+        f"{context_line}"
+        f"If you are confident you recognise the cell type, return a concise plain "
+        f"English name (no longer than 10 words, no trailing punctuation). "
+        f"If you are not confident, return the label exactly as given — do NOT guess. "
+        f"Label: \"{name}\""
+    )
+
+    try:
+        if api == "claude":
+            import anthropic
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=60,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.content[0].text.strip()
+        elif api == "gemini":
+            from google import genai as google_genai
+            client = google_genai.Client(api_key=os.environ.get('GOOGLE_API_KEY'))
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            return ''.join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+        else:
+            return None
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(k in err_str for k in ('credit', 'billing', 'unauthorized', 'invalid_api_key', 'permission')):
+            raise FatalAPIError(f"{api} API fatal error: {e}")
         return None
 
 
@@ -226,10 +444,10 @@ def main():
     if unmatched_names:
         # Check for API keys
         has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
-        has_openai = bool(os.environ.get('OPENAI_API_KEY'))
+        has_gemini = bool(os.environ.get('GOOGLE_API_KEY'))
 
-        if not has_anthropic and not has_openai:
-            print("\n  Warning: No API keys found (ANTHROPIC_API_KEY, OPENAI_API_KEY).")
+        if not has_anthropic and not has_gemini:
+            print("\n  Warning: No API keys found (ANTHROPIC_API_KEY, GOOGLE_API_KEY).")
             print("  Unmatched names will be left without CL term IDs.")
             for name in unmatched_names:
                 mapping[name] = ''
@@ -241,32 +459,32 @@ def main():
                 print(f"\n  Mapping: \"{name}\"")
 
                 claude_result = None
-                openai_result = None
+                gemini_result = None
 
                 if has_anthropic:
                     claude_result = query_llm_mapping(name, cl_names, api="claude")
                     if claude_result:
                         print(f"    Claude suggests: {claude_result} ({cl_names.get(claude_result, '?')})")
 
-                if has_openai:
-                    openai_result = query_llm_mapping(name, cl_names, api="openai")
-                    if openai_result:
-                        print(f"    OpenAI suggests: {openai_result} ({cl_names.get(openai_result, '?')})")
+                if has_gemini:
+                    gemini_result = query_llm_mapping(name, cl_names, api="gemini")
+                    if gemini_result:
+                        print(f"    Gemini suggests: {gemini_result} ({cl_names.get(gemini_result, '?')})")
 
                 # If both agree, auto-accept
-                if claude_result and openai_result and claude_result == openai_result:
+                if claude_result and gemini_result and claude_result == gemini_result:
                     mapping[name] = claude_result
                     match_method[name] = 'llm_consensus'
                     llm_consensus_count += 1
                     print(f"    -> Auto-accepted (both LLMs agree): {claude_result}")
-                elif claude_result or openai_result:
+                elif claude_result or gemini_result:
                     # LLMs disagree or only one responded -> interactive prompt
                     print(f"\n    LLMs disagree for \"{name}\":")
                     options = []
                     if claude_result:
                         options.append(('c', claude_result, f"Claude: {claude_result} ({cl_names.get(claude_result, '?')})"))
-                    if openai_result:
-                        options.append(('o', openai_result, f"OpenAI: {openai_result} ({cl_names.get(openai_result, '?')})"))
+                    if gemini_result:
+                        options.append(('o', gemini_result, f"Gemini: {gemini_result} ({cl_names.get(gemini_result, '?')})"))
                     options.append(('s', '', "Skip (leave unmapped)"))
                     options.append(('m', None, "Manual (type CL ID)"))
 
@@ -299,13 +517,13 @@ def main():
                         mapping[name] = claude_result
                         match_method[name] = 'user_selected_claude'
                         user_resolved_count += 1
-                    elif choice == 'o' and openai_result:
-                        mapping[name] = openai_result
-                        match_method[name] = 'user_selected_openai'
+                    elif choice == 'o' and gemini_result:
+                        mapping[name] = gemini_result
+                        match_method[name] = 'user_selected_gemini'
                         user_resolved_count += 1
                     else:
                         # Default to first available suggestion
-                        first = claude_result or openai_result
+                        first = claude_result or gemini_result
                         if first:
                             mapping[name] = first
                             match_method[name] = 'user_default'
