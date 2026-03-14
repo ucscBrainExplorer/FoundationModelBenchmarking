@@ -4,7 +4,6 @@ pandas
 scikit-learn
 pronto
 networkx
-boto3
 matplotlib
 seaborn
 umap-learn

@@ -114,8 +114,8 @@ def main():
     )
     parser.add_argument("term_a", help="Cell type name or CL term ID")
     parser.add_argument("term_b", help="Cell type name or CL term ID")
-    parser.add_argument("--obo", default="/mnt/efsUCE/cl-basic.obo",
-                        help="Path to OBO file (default: /mnt/efsUCE/cl-basic.obo)")
+    parser.add_argument("--obo", required=True,
+                        help="Path to Cell Ontology OBO file (e.g. cl.obo)")
     args = parser.parse_args()
 
     print("Loading ontology and computing IC...", file=sys.stderr)
