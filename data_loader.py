@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import pandas as pd
 from typing import List, Dict
+from prediction_module import validate_ref_columns
 
 def load_faiss_index(path: str, index_type: str = 'ivfFlat') -> faiss.Index:
     """
@@ -52,11 +53,7 @@ def load_reference_annotations(path: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Reference annotations file not found at: {path}")
 
     df = pd.read_csv(path, sep='\t')
-
-    required_columns = ['cell_type_ontology_term_id']
-    if not all(col in df.columns for col in required_columns):
-        raise ValueError(f"Annotation file must contain column: {required_columns[0]}")
-
+    validate_ref_columns(df)
     return df
 
 def load_test_batch(test_dir: str) -> List[Dict[str, str]]:

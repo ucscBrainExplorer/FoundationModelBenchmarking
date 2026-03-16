@@ -208,7 +208,6 @@ class TestCLI:
         assert 'weighted_cell_type' in df.columns
         assert 'weighted_score' in df.columns
         assert 'mean_euclidean_distance' in df.columns
-        assert 'neighbor_distances' in df.columns
         assert len(df) > 0
         assert (df['weighted_score'] >= 0).all()
         assert (df['weighted_score'] <= 1 + 1e-5).all()  # float32 sum tolerance

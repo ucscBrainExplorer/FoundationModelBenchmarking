@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from data_loader import load_faiss_index, load_reference_annotations
-from prediction_module import execute_query, vote_neighbors, distance_weighted_knn_vote
+from prediction_module import execute_query, vote_neighbors, distance_weighted_knn_vote, resolve_labels
 from obo_parser import parse_obo_names, parse_obo_replacements
 
 
@@ -163,8 +163,8 @@ def main():
         cols['weighted_cell_type'] = [cl_names.get(p, p) for p in wt_preds]
         cols['weighted_score'] = wt_scores
 
-    # 9. Map each neighbor's CL term ID -> canonical readable name, sorted by distance
-    ref_term_ids = ref_df['cell_type_ontology_term_id'].values
+    # 9. Map each neighbor's resolved label -> canonical readable name, sorted by distance
+    ref_term_ids = resolve_labels(ref_df)
     neighbor_distances_list = []
     neighbor_names_list = []
 

@@ -60,9 +60,45 @@ def load_ref_annot(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Reference annotations not found: {path}")
     df = pd.read_csv(path, sep='\t')
-    if 'cell_type_ontology_term_id' not in df.columns:
-        raise ValueError("Reference annotations must contain a 'cell_type_ontology_term_id' column")
+    validate_ref_columns(df)
     return df
+
+
+def validate_ref_columns(ref_df: pd.DataFrame) -> None:
+    has_cl_id  = 'cell_label_ontology_term_id' in ref_df.columns
+    has_cl_lbl = 'cell_label' in ref_df.columns
+    has_ct_id  = 'cell_type_ontology_term_id' in ref_df.columns
+    has_ct_lbl = 'cell_type' in ref_df.columns
+
+    if has_cl_id != has_cl_lbl:
+        missing = 'cell_label' if has_cl_id else 'cell_label_ontology_term_id'
+        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
+    if has_ct_id != has_ct_lbl:
+        missing = 'cell_type' if has_ct_id else 'cell_type_ontology_term_id'
+        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
+    if not (has_cl_id and has_cl_lbl) and not (has_ct_id and has_ct_lbl):
+        raise ValueError(
+            "Reference annotations must contain at least one complete column pair: "
+            "('cell_label_ontology_term_id' + 'cell_label') or "
+            "('cell_type_ontology_term_id' + 'cell_type')"
+        )
+
+
+def resolve_labels(ref_df: pd.DataFrame) -> np.ndarray:
+    if 'cell_label_ontology_term_id' in ref_df.columns:
+        id_col, lbl_col = ref_df['cell_label_ontology_term_id'], ref_df['cell_label']
+    else:
+        id_col, lbl_col = ref_df['cell_type_ontology_term_id'], ref_df['cell_type']
+
+    def _clean(col):
+        s = col.astype(str).str.strip()
+        s = s.where(col.notna(), '')
+        return s.where(s != 'nan', '')
+
+    id_s  = _clean(id_col)
+    lbl_s = _clean(lbl_col)
+    result = id_s.where(id_s != '', lbl_s)
+    return result.where(result != '', 'missing_label').values
 
 
 def parse_obo_names(obo_path: str) -> dict:
@@ -176,12 +212,7 @@ def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, te
         ]
         pairs.sort(key=lambda x: x[0])
 
-        valid_labels = []
-        for d, idx in pairs:
-            raw = term_ids[idx]
-            term = '' if (pd.isna(raw) or str(raw).strip() == '') else str(raw).strip()
-            if term:
-                valid_labels.append(term)
+        valid_labels = [str(term_ids[idx]) for d, idx in pairs]
 
         if valid_labels:
             counts = Counter(valid_labels)
@@ -245,7 +276,7 @@ def main():
 
     print(f"Loading reference annotations from {args.ref_annot}...")
     ref_df = load_ref_annot(args.ref_annot)
-    term_ids = ref_df['cell_type_ontology_term_id'].values
+    term_ids = resolve_labels(ref_df)
     print(f"  {len(ref_df)} reference cells")
 
     print(f"Parsing OBO file {args.obo}...")

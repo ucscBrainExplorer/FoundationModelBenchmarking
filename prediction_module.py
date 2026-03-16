@@ -5,6 +5,61 @@ from collections import Counter
 from typing import List, Tuple, Union
 
 
+def validate_ref_columns(ref_df: pd.DataFrame) -> None:
+    """
+    Validate that ref_df contains at least one complete label pair:
+      - ('cell_label_ontology_term_id' + 'cell_label'), or
+      - ('cell_type_ontology_term_id'  + 'cell_type')
+
+    Raises ValueError if a pair is only partially present or if neither pair exists.
+    """
+    has_cl_id  = 'cell_label_ontology_term_id' in ref_df.columns
+    has_cl_lbl = 'cell_label' in ref_df.columns
+    has_ct_id  = 'cell_type_ontology_term_id' in ref_df.columns
+    has_ct_lbl = 'cell_type' in ref_df.columns
+
+    if has_cl_id != has_cl_lbl:
+        missing = 'cell_label' if has_cl_id else 'cell_label_ontology_term_id'
+        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
+    if has_ct_id != has_ct_lbl:
+        missing = 'cell_type' if has_ct_id else 'cell_type_ontology_term_id'
+        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
+    if not (has_cl_id and has_cl_lbl) and not (has_ct_id and has_ct_lbl):
+        raise ValueError(
+            "Reference annotations must contain at least one complete column pair: "
+            "('cell_label_ontology_term_id' + 'cell_label') or "
+            "('cell_type_ontology_term_id' + 'cell_type')"
+        )
+
+
+def resolve_labels(ref_df: pd.DataFrame) -> np.ndarray:
+    """
+    Resolve the effective voting label for each reference cell.
+
+    Source detection (cell_label pair takes priority over cell_type pair):
+      - If 'cell_label_ontology_term_id' is present: use it, fall back to 'cell_label'
+        for rows where it is missing/invalid.
+      - Otherwise: use 'cell_type_ontology_term_id', fall back to 'cell_type'.
+
+    Assumes ref_df has been validated by validate_ref_columns().
+    Returns a string ndarray of length len(ref_df).
+    """
+    if 'cell_label_ontology_term_id' in ref_df.columns:
+        id_col, lbl_col = ref_df['cell_label_ontology_term_id'], ref_df['cell_label']
+    else:
+        id_col, lbl_col = ref_df['cell_type_ontology_term_id'], ref_df['cell_type']
+
+    def _clean(col):
+        s = col.astype(str).str.strip()
+        s = s.where(col.notna(), '')
+        return s.where(s != 'nan', '')
+
+    id_s  = _clean(id_col)
+    lbl_s = _clean(lbl_col)
+    result = id_s.where(id_s != '', lbl_s)
+    return result.where(result != '', 'missing_label').values
+
+
 def gaussian_kernel_weights(dists: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     """
     Convert distances to Gaussian kernel weights.
@@ -35,7 +90,7 @@ def distance_weighted_knn_vote(neighbor_indices: np.ndarray, neighbor_dists: np.
     if neighbor_indices.size == 0:
         return [], []
 
-    term_ids = reference_annotations['cell_type_ontology_term_id'].values
+    term_ids = resolve_labels(reference_annotations)
 
     # Zero out distances for invalid FAISS sentinels before computing weights
     valid_mask = neighbor_indices >= 0
@@ -54,18 +109,8 @@ def distance_weighted_knn_vote(neighbor_indices: np.ndarray, neighbor_dists: np.
             vote_percentages.append(float('nan'))
             continue
 
-        # Filter out empty/NaN labels
-        valid_terms = []
-        filtered_w = []
-        for t, w in zip(term_ids[valid_idx], valid_w):
-            if pd.notna(t) and str(t).strip() not in ('', 'nan'):
-                valid_terms.append(str(t).strip())
-                filtered_w.append(w)
-
-        if not valid_terms:
-            predictions.append('')
-            vote_percentages.append(float('nan'))
-            continue
+        valid_terms = [str(t) for t in term_ids[valid_idx]]
+        filtered_w = list(valid_w)
 
         total = sum(filtered_w)
         label_weights: dict = {}
@@ -106,13 +151,12 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
 
     Returns:
         Tuple[List[str], List[float]]:
-            - Predicted cell_type_terminology_id for each query (empty string if all neighbors missing)
-            - Vote percentage (0.0-1.0) for the winning prediction, or NaN if no valid votes
+            - Predicted label for each query (empty string only if all FAISS neighbors are -1)
+            - Vote percentage (0.0-1.0) for the winning label, or NaN if no valid FAISS neighbors
 
     Note:
-        Invalid labels (NaN, empty strings, None) are filtered out before voting.
-        Only neighbors with valid cell_type_ontology_term_id values participate in the vote.
-        If all neighbors have missing labels, an empty string is returned with NaN percentage.
+        All valid FAISS neighbors vote, including those with missing source labels (which
+        vote as 'missing_label'). Only FAISS sentinel (-1) neighbors are excluded.
     """
     predictions = []
     vote_percentages = []
@@ -127,9 +171,7 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
     if max_idx >= len(reference_annotations):
         raise IndexError(f"Neighbor index {max_idx} out of bounds for reference annotations with size {len(reference_annotations)}")
     
-    # Extract the relevant column once to speed up lookups
-    # Assuming the column name is 'cell_type_ontology_term_id' based on plan
-    term_ids = reference_annotations['cell_type_ontology_term_id'].values
+    term_ids = resolve_labels(reference_annotations)
     
     for row_indices in neighbor_indices:
         # Filter out -1 indices (FAISS returns -1 for unfound neighbors)
@@ -139,24 +181,7 @@ def vote_neighbors(neighbor_indices: np.ndarray, reference_annotations: pd.DataF
             predictions.append('')
             vote_percentages.append(float('nan'))
             continue
-        # Retrieve the terms for the valid neighbors
-        neighbor_terms = term_ids[valid_indices]
-        
-        # Filter out invalid labels (NaN, empty strings, None)
-        # Convert to list to handle numpy array indexing properly
-        valid_terms = []
-        for term in neighbor_terms:
-            # Check if term is valid: not NaN, not None, and not empty string
-            if pd.notna(term) and term is not None:
-                term_str = str(term).strip()
-                if term_str != '' and term_str.lower() != 'nan':
-                    valid_terms.append(term_str)
-        
-        # If no valid labels found, return empty string with NaN percentage
-        if len(valid_terms) == 0:
-            predictions.append('')
-            vote_percentages.append(float('nan'))
-            continue
+        valid_terms = [str(t) for t in term_ids[valid_indices]]
         
         # Majority vote among valid labels only
         # In case of ties, Counter.most_common returns the first one encountered which is arbitrary but standard
