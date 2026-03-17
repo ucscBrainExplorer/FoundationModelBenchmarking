@@ -179,9 +179,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="networkx")
 import pandas as pd
 import requests
 
-from evaluate import build_label_mapping, resolve_name, _is_cl_id
+from evaluate import build_label_mapping, resolve_name
 from obo_parser import parse_obo_names
 from annotate_cl_terms import fuzzy_normalize, query_llm_mapping, query_llm_ancestor, query_llm_label, FatalAPIError
+from column_hierarchy import _is_cl_id, _is_metadata_column, _get_cellxgene_cols, detect_leaf_column
 
 
 def fetch_doi_context(doi):
@@ -306,68 +307,6 @@ def build_parser():
     return parser
 
 
-_METADATA_NAME_TOKENS = {
-    'id', 'ids', 'barcode', 'barcodes', 'index', 'indices',
-    'sample', 'samples', 'donor', 'donors', 'batch', 'batches',
-    'uuid', 'accession', 'key',
-}
-
-# Standard cellxgene schema metadata columns that are never cell type annotations
-_CELLXGENE_METADATA_COLS = {
-    'assay', 'development_stage', 'disease', 'donor_id', 'self_reported_ethnicity',
-    'sex', 'suspension_type', 'tissue', 'tissue_type',
-}
-
-
-def _is_metadata_column(col_name, values):
-    """Heuristic: return True if the column looks like metadata, not annotations."""
-    # Ontology term ID columns are always IDs, never annotation labels
-    if col_name.endswith('_ontology_term_id'):
-        return True
-
-    # Known cellxgene schema metadata columns
-    if col_name in _CELLXGENE_METADATA_COLS:
-        return True
-
-    # Column name tokens (split on _, -, space) contain known ID/metadata keywords
-    tokens = set(re.split(r'[_\-\s]+', col_name.lower()))
-    if tokens & _METADATA_NAME_TOKENS:
-        return True
-
-    non_null = [v for v in values if pd.notna(v)]
-    if not non_null:
-        return True
-
-    # Numeric columns (ages, coordinates, counts)
-    numeric_count = 0
-    for v in non_null[:200]:
-        try:
-            float(v)
-            numeric_count += 1
-        except (ValueError, TypeError):
-            pass
-    if numeric_count / max(len(non_null[:200]), 1) > 0.8:
-        return True
-
-    # Count unique values across the full column (cheap set operation)
-    n_unique = len(set(str(v) for v in non_null))
-
-    # High-cardinality columns (barcodes, IDs)
-    if n_unique > 1000:
-        return True
-
-    # Very low cardinality (< 3 unique values) — likely a constant/flag field
-    if n_unique < 3:
-        return True
-
-    # Columns that are already CL term IDs (we want to IMPROVE upon those)
-    cl_count = sum(1 for v in non_null[:200] if _is_cl_id(str(v).strip()))
-    if cl_count / max(len(non_null[:200]), 1) > 0.9:
-        return True
-
-    return False
-
-
 def score_column(values, name_to_id, synonym_to_id, fuzzy_name_to_id,
                  fuzzy_synonym_to_id, cl_names):
     """Score a column by the fraction of unique labels that resolve to CL terms.
@@ -393,103 +332,6 @@ def score_column(values, name_to_id, synonym_to_id, fuzzy_name_to_id,
 
     score = n_resolved / len(unique_labels)
     return score, len(unique_labels), n_resolved
-
-
-def _get_cellxgene_cols(df):
-    """Return the set of cellxgene display-name columns to skip.
-
-    A column is a cellxgene display column if a paired "{col}_ontology_term_id"
-    column exists and contains >90% CL IDs.
-    """
-    cellxgene_cols = set()
-    for col in df.columns:
-        paired = col + '_ontology_term_id'
-        if paired in df.columns:
-            sample = [v for v in df[paired] if pd.notna(v) and str(v).strip()][:200]
-            cl_frac = sum(1 for v in sample if _is_cl_id(str(v).strip())) / max(len(sample), 1)
-            if cl_frac > 0.9:
-                cellxgene_cols.add(col)
-    return cellxgene_cols
-
-
-def detect_leaf_column(df):
-    """Detect the most granular annotation column via hierarchy inference.
-
-    Filters candidate annotation columns, builds parent-child relationships
-    among them using functional dependency, and returns the leaf (the column
-    with no finer-grained children).  If multiple leaves exist, the one
-    appearing latest in the file is preferred (updated columns come after
-    their predecessors).
-
-    Returns:
-        Tuple of (column_name_or_None, report_string).
-    """
-    cellxgene_cols = _get_cellxgene_cols(df)
-
-    # Collect candidate annotation columns in file order, excluding cellxgene cols
-    candidates = []
-    for col in df.columns:
-        if col in cellxgene_cols:
-            continue
-        if not _is_metadata_column(col, df[col].tolist()):
-            candidates.append(col)
-
-    # If filtering cellxgene cols leaves nothing, fall back to including them —
-    # they may be the only annotation columns available
-    if not candidates and cellxgene_cols:
-        print(f"  No author annotation columns found — falling back to cellxgene label columns: {sorted(cellxgene_cols)}")
-        for col in df.columns:
-            if col in cellxgene_cols and not _is_metadata_column(col, df[col].tolist()):
-                candidates.append(col)
-    elif cellxgene_cols:
-        skipped_info = ', '.join(f"'{c}' ({df[c].nunique()} categories)" for c in sorted(cellxgene_cols))
-        print(f"  Skipping cellxgene label columns: {skipped_info}")
-
-    if not candidates:
-        return None, "No candidate annotation columns found."
-
-    # Determine which candidates have at least one child among the candidates.
-    # C is a child of P when: every unique value of C maps to exactly one value
-    # of P, and C has strictly more unique values than P.
-    nunique = {col: df[col].nunique() for col in candidates}
-    has_child = set()
-    for P in candidates:
-        for C in candidates:
-            if C == P or nunique[C] <= nunique[P]:
-                continue
-            pairs = df[[C, P]].dropna()
-            if len(pairs) == 0:
-                continue
-            if (pairs.groupby(C)[P].nunique() == 1).all():
-                has_child.add(P)
-                break  # P has at least one child; no need to check further
-
-    leaves = [col for col in candidates if col not in has_child]
-
-    lines = ["Column hierarchy detection:"]
-    lines.append(f"  Candidate columns: {candidates}")
-    lines.append(f"  Columns with children (non-leaf): {sorted(has_child)}")
-
-    if not leaves:
-        # Degenerate case: every column appears to have a child (cycle or all same size)
-        # Fall back to the last candidate with the most unique values.
-        leaves = [max(candidates, key=lambda c: (nunique[c], candidates.index(c)))]
-        lines.append(f"  No clear leaf found — falling back to most granular: '{leaves[0]}'")
-    else:
-        lines.append(f"  Leaf column(s): {leaves}")
-
-    # Among leaves, prefer columns whose name signals a revision, then fall
-    # back to latest in file order (updated columns appear after originals).
-    _REVISED_PATTERN = re.compile(
-        r'\b(updated|revised|final|corrected|curated|clean|v\d)\b', re.IGNORECASE
-    )
-    selected = max(leaves, key=lambda c: (
-        bool(_REVISED_PATTERN.search(c)),
-        candidates.index(c)
-    ))
-    lines.append(f"  Selected: '{selected}' ({nunique[selected]} unique labels)")
-
-    return selected, '\n'.join(lines)
 
 
 # ---------------------------------------------------------------------------
