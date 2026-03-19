@@ -34,7 +34,7 @@ def build_parser():
     parser.add_argument("--index", type=str, required=True,
                         help="Path to FAISS index file (.faiss)")
     parser.add_argument("--ref_annot", type=str, required=True,
-                        help="Reference annotation TSV (needs cell_type_ontology_term_id)")
+                        help="Reference annotation TSV (needs cell_label_ontology_term_id+cell_label, or cell_type_ontology_term_id+cell_type)")
     parser.add_argument("--obo", type=str, required=True,
                         help="Cell Ontology OBO file (CL ID -> canonical name mapping)")
     parser.add_argument("--embeddings", type=str, required=True,
@@ -77,7 +77,8 @@ def main():
     # 3a. Resolve obsolete CL terms in reference annotations
     cl_replacements = parse_obo_replacements(args.obo)
     print(f"  Found {len(cl_replacements)} obsolete terms with replacements")
-    term_col = 'cell_type_ontology_term_id'
+    term_col = ('cell_label_ontology_term_id' if 'cell_label_ontology_term_id' in ref_df.columns
+                else 'cell_type_ontology_term_id')
     ref_terms = ref_df[term_col]
     obsolete_mask = ref_terms.isin(cl_replacements)
     n_replaced = int(obsolete_mask.sum())

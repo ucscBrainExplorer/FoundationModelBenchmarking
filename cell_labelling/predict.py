@@ -125,6 +125,28 @@ def parse_obo_names(obo_path: str) -> dict:
     return cl_map
 
 
+def parse_obo_replacements(obo_path: str) -> dict:
+    """Parse an OBO file and return {obsolete_id: replacement_id}."""
+    replacements = {}
+    current_id = None
+    in_term = False
+    with open(obo_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line == '[Term]':
+                in_term = True
+                current_id = None
+            elif line.startswith('[') and line.endswith(']'):
+                in_term = False
+                current_id = None
+            elif in_term:
+                if line.startswith('id: '):
+                    current_id = line[4:]
+                elif line.startswith('replaced_by: ') and current_id:
+                    replacements[current_id] = line[13:]
+    return replacements
+
+
 # ---------------------------------------------------------------------------
 # Core KNN + voting
 # ---------------------------------------------------------------------------
@@ -260,7 +282,7 @@ def build_parser():
     )
     parser.add_argument('--index',      required=True, help='FAISS index file (.faiss)')
     parser.add_argument('--adata',      required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
-    parser.add_argument('--ref_annot',  required=True, help='Reference metadata TSV (needs cell_type_ontology_term_id)')
+    parser.add_argument('--ref_annot',  required=True, help='Reference metadata TSV (needs cell_label_ontology_term_id+cell_label, or cell_type_ontology_term_id+cell_type)')
     parser.add_argument('--obo',        required=True, help='Cell Ontology OBO file (cl.obo) for ID -> name translation')
     parser.add_argument('--method',     default='distance_weighted_knn',
                         choices=['majority_voting', 'distance_weighted_knn', 'both'],
@@ -282,6 +304,17 @@ def main():
     print(f"Parsing OBO file {args.obo}...")
     cl_names = parse_obo_names(args.obo)
     print(f"  {len(cl_names)} ontology terms")
+
+    cl_replacements = parse_obo_replacements(args.obo)
+    print(f"  {len(cl_replacements)} obsolete terms with replacements")
+    term_col = ('cell_label_ontology_term_id' if 'cell_label_ontology_term_id' in ref_df.columns
+                else 'cell_type_ontology_term_id')
+    ref_terms = ref_df[term_col]
+    n_replaced = int(ref_terms.isin(cl_replacements).sum())
+    if n_replaced > 0:
+        ref_df[term_col] = ref_terms.replace(cl_replacements)
+        term_ids = resolve_labels(ref_df)
+        print(f"  Resolved {n_replaced} obsolete reference terms")
 
     print(f"Loading embeddings from {args.adata}...")
     embeddings, cell_ids = load_adata(args.adata)

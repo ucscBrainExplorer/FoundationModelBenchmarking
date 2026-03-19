@@ -110,7 +110,7 @@ def query_llm_mapping(name, cl_terms_subset, api="claude", paper_context=None):
                            for cl_id, cl_name in sorted(cl_terms_subset.items()))
 
     context_line = (
-        f"This label comes from the following study: {paper_context}\n"
+        f"Biological context: {paper_context}\n"
         if paper_context else ""
     )
     prompt = (
@@ -119,11 +119,12 @@ def query_llm_mapping(name, cl_terms_subset, api="claude", paper_context=None):
         f"{context_line}"
         f"Rules:\n"
         f"- HARD RULE: If the label contains a marker gene (e.g. VIP, SST, PV, SNCG, "
-        f"LAMP5, PVALB, CCK, NPY, CR, CB), you MUST choose the term that includes that "
-        f"marker gene name. Do NOT choose a broader lineage or origin term (e.g. 'caudal "
-        f"ganglionic eminence derived interneuron') when a marker-specific term (e.g. "
-        f"'VIP GABAergic interneuron', 'sst GABAergic interneuron') is available in the "
-        f"candidate list. The marker gene takes priority over lineage origin.\n"
+        f"LAMP5, PVALB, CCK, NPY, CR, CB, CALB1, CALB2, RELN, TH, CHAT, GAD1, GAD2), "
+        f"you MUST choose the term that includes that marker gene name. Do NOT choose a "
+        f"broader lineage or origin term (e.g. 'caudal ganglionic eminence derived "
+        f"interneuron') when a marker-specific term (e.g. 'VIP GABAergic interneuron', "
+        f"'sst GABAergic interneuron') is available in the candidate list. The marker "
+        f"gene takes priority over lineage origin.\n"
         f"- HARD RULE: If the label or description contains a distinctive biological word "
         f"(e.g. 'tripotential', 'corticothalamic', 'intratelencephalic') that appears "
         f"verbatim in a candidate term's name, strongly prefer that term over a generic "
@@ -136,9 +137,16 @@ def query_llm_mapping(name, cl_terms_subset, api="claude", paper_context=None):
         f"For example, if the label says 'IT neuron' without mentioning a layer, "
         f"do NOT pick 'L2/3 IT neuron' or 'L5 IT neuron' — reply NONE instead and let the "
         f"ancestor fallback find the right parent term.\n"
+        f"- Do NOT choose a term restricted to a specific organ or tissue "
+        f"(e.g. 'pancreas', 'liver', 'kidney', 'heart', 'lung', 'blood', 'retina') "
+        f"unless that organ is explicitly named in the label or context.\n"
         f"- Only select a term if you are confident it is biologically correct.\n"
         f"- Novel or recently described cell types may not have a CL term — reply NONE.\n"
         f"- If no term captures the full specificity of the label, reply NONE.\n"
+        f"- HARD RULE: If the label refers to a tissue region, anatomical structure, or "
+        f"developmental zone (e.g. 'Cortical Hem', 'Ventricular Zone', 'Ganglionic "
+        f"Eminence') rather than a specific cell identity, reply NONE — anatomical "
+        f"structures are not cell types.\n"
         f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
     )
 
@@ -216,7 +224,7 @@ def query_llm_ancestor(name, cl_terms_subset, api="claude", paper_context=None):
     candidates = "\n".join(f"  {cl_id}: {cl_name}"
                            for cl_id, cl_name in sorted(cl_terms_subset.items()))
     context_line = (
-        f"This label comes from the following study: {paper_context}\n"
+        f"Biological context: {paper_context}\n"
         if paper_context else ""
     )
     prompt = (
@@ -243,6 +251,10 @@ def query_llm_ancestor(name, cl_terms_subset, api="claude", paper_context=None):
         f"name is in the list, check whether a species-agnostic parent term also exists "
         f"in the list and use that instead. Only use a species-specific term if no "
         f"species-agnostic equivalent is present in the candidate list.\n"
+        f"- HARD RULE: If the label refers to a tissue region, anatomical structure, or "
+        f"developmental zone (e.g. 'Cortical Hem', 'Ventricular Zone', 'Ganglionic "
+        f"Eminence') rather than a specific cell identity, reply NONE — anatomical "
+        f"structures are not cell types.\n"
         f"- If no reasonable ancestor exists, reply NONE.\n"
         f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
     )

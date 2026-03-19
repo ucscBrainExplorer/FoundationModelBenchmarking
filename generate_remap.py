@@ -182,7 +182,7 @@ import requests
 from evaluate import build_label_mapping, resolve_name
 from obo_parser import parse_obo_names
 from annotate_cl_terms import fuzzy_normalize, query_llm_mapping, query_llm_ancestor, query_llm_label, FatalAPIError
-from column_hierarchy import _is_cl_id, _is_metadata_column, _get_cellxgene_cols, detect_leaf_column
+from column_hierarchy import _is_cl_id, _is_metadata_column, _get_cellxgene_cols, detect_leaf_column, _is_functional
 
 
 def fetch_doi_context(doi):
@@ -304,6 +304,10 @@ def build_parser():
                         help="Path to the source paper PDF. The LLM extracts a cell type "
                              "glossary in one upfront call, which is then used as context "
                              "for all label queries. Overrides --doi if both are given.")
+    parser.add_argument("--context", type=str, default=None,
+                        help="Free-text biological context passed directly to the LLM "
+                             "(e.g. 'brain organoid scRNA-seq; IPC = Intermediate Progenitor "
+                             "Cell'). Useful when no paper is available. Overridden by --pdf.")
     return parser
 
 
@@ -800,8 +804,10 @@ def generate_remap(df, column, obo_path, paper_context=None):
     glossary_lookup = {}
     if paper_context:
         for line in paper_context.splitlines():
-            if ':' in line:
-                key, _, val = line.partition(':')
+            # Accept both "KEY: value" and "KEY = value" separators
+            sep = ':' if ':' in line else ('=' if '=' in line else None)
+            if sep:
+                key, _, val = line.partition(sep)
                 key = key.strip().lower()
                 key = re.sub(r'[\u2013\u2014\u2012]', '-', key)  # normalize dashes
                 val = val.strip()
@@ -821,10 +827,28 @@ def generate_remap(df, column, obo_path, paper_context=None):
             # variation in extracted glossary keys, then also try plural forms.
             lbl_lower = lbl.lower()
             lbl_norm = re.sub(r'[\u2013\u2014\u2012]', '-', lbl_lower)
+            # Full-label match first (handles paper-extracted glossaries)
             glossary_hit = (glossary_lookup.get(lbl_lower)
                             or glossary_lookup.get(lbl_norm)
                             or glossary_lookup.get(lbl_lower + 's')
                             or glossary_lookup.get(lbl_lower.rstrip('s')))
+            # Token-level match: expand abbreviation tokens within the label
+            # (e.g. "ENs - Activated" → token "en" → "excitatory neuron")
+            if not glossary_hit and glossary_lookup:
+                tokens = re.split(r'[\s\-_/]+', lbl_norm)
+                expanded_parts = []
+                matched = False
+                for tok in tokens:
+                    hit = (glossary_lookup.get(tok)
+                           or glossary_lookup.get(tok.rstrip('s'))
+                           or glossary_lookup.get(tok + 's'))
+                    if hit:
+                        expanded_parts.append(hit)
+                        matched = True
+                    else:
+                        expanded_parts.append(tok)
+                if matched:
+                    glossary_hit = ' '.join(expanded_parts)
             if glossary_hit:
                 label_hints[lbl] = glossary_hit
                 label_hint_method[lbl] = 'glossary'
@@ -1013,8 +1037,7 @@ def detect_parent_columns(df, child_col, exclude_cols=None):
         if col_nunique >= child_nunique or col_nunique < 2:
             continue
         pairs = df[[child_col, col]].dropna()
-        grouped = pairs.groupby(child_col)[col].nunique()
-        if (grouped == 1).all():
+        if _is_functional(pairs, child_col, col):
             parents.append((col, col_nunique))
 
     parents.sort(key=lambda x: x[1])
@@ -1046,8 +1069,7 @@ def detect_child_columns(df, parent_col):
         if col_nunique <= parent_nunique or col_nunique < 2:
             continue
         pairs = df[[col, parent_col]].dropna()
-        grouped = pairs.groupby(col)[parent_col].nunique()
-        if (grouped == 1).all():
+        if _is_functional(pairs, col, parent_col):
             children.append((col, col_nunique))
 
     children.sort(key=lambda x: x[1])
@@ -1235,6 +1257,9 @@ def main():
             print(f"  {paper_context[:120]}...")
         else:
             print("  Could not retrieve context — proceeding without it.")
+    elif args.context:
+        paper_context = args.context
+        print(f"\nUsing provided context: {paper_context[:120]}")
 
     # Load input
     print(f"Loading {args.input}...")

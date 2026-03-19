@@ -18,7 +18,7 @@ import sys
 
 import pandas as pd
 
-from column_hierarchy import _REVISED_PATTERN, detect_full_hierarchy
+from column_hierarchy import _REVISED_PATTERN, _cell_type_score, detect_full_hierarchy
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +100,8 @@ def print_hierarchy(df, candidates, parent_of, children_of,
     if leaves:
         selected = max(leaves, key=lambda c: (
             bool(_REVISED_PATTERN.search(c)),
+            _cell_type_score(df[c].dropna().unique().tolist()) >= 0.3,
+            nunique[c],
             candidates.index(c)
         ))
         print(f"\n{'─' * 62}")
@@ -109,9 +111,20 @@ def print_hierarchy(df, candidates, parent_of, children_of,
         print(f"\n{'─' * 62}")
         print(f"cell_type_col (most granular fallback): '{selected}'  ({nunique[selected]} categories)")
 
+    # ---- linear chain ----
+    chain = []
+    col = selected
+    while col is not None:
+        chain.append(col)
+        col = parent_of.get(col)
+    chain.reverse()
+    print(f"\n{'─' * 62}")
+    print("Hierarchy chain:")
+    print("  " + " → ".join(chain))
+
     # ---- summary table ----
     print(f"\n{'─' * 62}")
-    print(f"  {'Column':<38} {'#categories':>12}  role")
+    print(f"  {'Column':<38} {'#categories':>12}  {'ct_score':>8}  role")
     print(f"{'─' * 62}")
     for col in candidates:
         parts = []
@@ -122,7 +135,8 @@ def print_hierarchy(df, candidates, parent_of, children_of,
         if col == selected:
             parts.append("cell_type_col")
         role = ", ".join(parts) if parts else "intermediate"
-        print(f"  {col:<38} {nunique[col]:>12}  {role}")
+        score = _cell_type_score(df[col].dropna().unique().tolist())
+        print(f"  {col:<38} {nunique[col]:>12}  {score:>8.2f}  {role}")
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +173,7 @@ def main():
         if leaves:
             selected = max(leaves, key=lambda c: (
                 bool(_REVISED_PATTERN.search(c)),
+                nunique[c],
                 candidates.index(c)
             ))
         else:

@@ -273,58 +273,6 @@ def resolve_to_cl_ids(values, obo_path, cl_names=None):
     return resolved, True, report, unresolved_names
 
 
-def load_remap_file(path):
-    """Load a remap TSV (from generate_remap.py) into a lookup dict.
-
-    Args:
-        path: Path to remap TSV with columns original_label, cl_term_id, ...
-
-    Returns:
-        Dict {original_label: cl_term_id} (entries with empty cl_term_id are skipped).
-    """
-    df = pd.read_csv(path, sep='\t', comment='#')
-    remap = {}
-    for _, row in df.iterrows():
-        label = str(row['original_label']).strip()
-        cl_id = str(row.get('cl_term_id', '')).strip()
-        if cl_id and cl_id != 'nan' and _is_cl_id(cl_id):
-            remap[label] = cl_id
-    return remap
-
-
-def apply_remap(values, remap_dict, cl_names=None):
-    """Replace ground truth values using a remap dictionary.
-
-    Args:
-        values: List of ground truth strings (names or CL IDs).
-        remap_dict: {original_label: cl_term_id} dict from load_remap_file.
-        cl_names: Optional {CL_id: name} dict for reporting.
-
-    Returns:
-        Tuple of (remapped_values, n_remapped, remap_report).
-    """
-    remapped = []
-    n_remapped = 0
-    for v in values:
-        v_str = str(v).strip()
-        if v_str in remap_dict:
-            remapped.append(remap_dict[v_str])
-            n_remapped += 1
-        else:
-            remapped.append(v)
-
-    lines = [f"Applied remap: {n_remapped}/{len(values)} cells remapped"]
-    unique_remapped = set()
-    for v in values:
-        v_str = str(v).strip()
-        if v_str in remap_dict and v_str not in unique_remapped:
-            unique_remapped.add(v_str)
-            target = remap_dict[v_str]
-            target_name = cl_names.get(target, '') if cl_names else ''
-            lines.append(f"    {v_str} -> {target} ({target_name})")
-
-    return remapped, n_remapped, '\n'.join(lines)
-
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -340,15 +288,13 @@ def build_parser():
                         choices=["ic", "shortest_path"],
                         help="Ontology scoring method (default: ic)")
     parser.add_argument("--pred_id_col", type=str,
-                        default="predicted_cell_type_ontology_term_id",
-                        help="CL term ID column in predictions file (default: predicted_cell_type_ontology_term_id)")
+                        default="weighted_cell_type_ontology_term_id",
+                        help="CL term ID column in predictions file (default: weighted_cell_type_ontology_term_id)")
     parser.add_argument("--truth_id_col", type=str,
-                        default="cell_type_ontology_term_id",
-                        help="CL term ID column in ground truth file (default: cell_type_ontology_term_id)")
+                        default="mapped_cell_label_ontology_term_id",
+                        help="CL term ID column in ground truth file (default: mapped_cell_label_ontology_term_id)")
     parser.add_argument("--output-dir", type=str, default="evaluation_results",
                         help="Output directory (default: evaluation_results/)")
-    parser.add_argument("--remap-file", type=str, default=None,
-                        help="Remap TSV (from generate_remap.py) to replace ground truth labels before evaluation")
     return parser
 
 
@@ -410,17 +356,6 @@ def main():
     # Extract columns by row index (already aligned)
     predictions = pred_df[pred_col].tolist()
     ground_truth = truth_df[truth_col].tolist()
-
-    # 3a-pre. Apply remap file to ground truth if provided
-    remap_comment = ""
-    if args.remap_file:
-        print(f"\n  Loading remap file: {args.remap_file}")
-        remap_dict = load_remap_file(args.remap_file)
-        cl_names_for_remap = parse_obo_names(args.obo)
-        ground_truth, n_remapped, remap_report = apply_remap(
-            ground_truth, remap_dict, cl_names_for_remap)
-        print(f"  {remap_report}")
-        remap_comment = f"# Remap file: {args.remap_file} ({n_remapped} cells remapped)"
 
     # 3a. Auto-resolve readable names to CL term IDs if needed
     predictions, pred_resolved, pred_report, pred_unresolved = resolve_to_cl_ids(
@@ -511,8 +446,6 @@ def main():
     if truth_resolved:
         comment_lines.append(f"# Ground truth: readable names auto-resolved to CL term IDs (column: {truth_col})")
     comment_lines.append(obsolete_comment)
-    if remap_comment:
-        comment_lines.append(remap_comment)
     if prediction_provenance:
         comment_lines.append("# --- Prediction provenance (from predictions file) ---")
         comment_lines.extend(prediction_provenance)

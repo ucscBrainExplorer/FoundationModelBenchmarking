@@ -57,8 +57,9 @@ def _is_metadata_column(col_name, values):
     if col_name in _CELLXGENE_METADATA_COLS:
         return True
 
-    # Column name tokens (split on _, -, space) contain known ID/metadata keywords
-    tokens = set(re.split(r'[_\-\s]+', col_name.lower()))
+    # Column name tokens (split on _, -, space, and CamelCase boundaries)
+    expanded = re.sub(r'([a-z])([A-Z])', r'\1_\2', col_name)
+    tokens = set(re.split(r'[_\-\s]+', expanded.lower()))
     if tokens & _METADATA_NAME_TOKENS:
         return True
 
@@ -84,8 +85,8 @@ def _is_metadata_column(col_name, values):
     if n_unique > 1000:
         return True
 
-    # Very low cardinality (< 3 unique values) — likely a constant/flag field
-    if n_unique < 3:
+    # Very low cardinality (≤ 3 unique values) — likely a constant/flag field
+    if n_unique <= 3:
         return True
 
     # Columns that are already CL term IDs (we want to IMPROVE upon those)
@@ -111,6 +112,87 @@ def _get_cellxgene_cols(df):
             if cl_frac > 0.9:
                 cellxgene_cols.add(col)
     return cellxgene_cols
+
+
+# ---------------------------------------------------------------------------
+# Cell-type vocabulary scorer
+# ---------------------------------------------------------------------------
+
+# Whole-word tokens that are strong indicators of cell type annotation values
+_CELL_TYPE_TOKENS = {
+    # Generic
+    'cell', 'cells', 'type', 'types', 'subtype', 'subtypes', 'cluster', 'clusters',
+    # Neural / brain
+    'neuron', 'neurons', 'neuronal', 'neural',
+    'glia', 'glial', 'astrocyte', 'astrocytes', 'astro',
+    'oligodendrocyte', 'oligodendrocytes', 'oligo', 'opc',
+    'microglia', 'microglial',
+    'radial', 'progenitor', 'progenitors', 'npc',
+    'interneuron', 'interneurons', 'excitatory', 'inhibitory',
+    'ependymal', 'choroid', 'cajal', 'retzius',
+    'ipc', 'rg', 'org', 'trg', 'cr',
+    # Developmental state
+    'stem', 'precursor', 'precursors',
+    'cycling', 'dividing', 'proliferating', 'quiescent',
+    'early', 'late', 'mature', 'immature', 'newborn', 'activated', 'stressed',
+    # Blood / immune
+    'macrophage', 'macrophages', 'monocyte', 'monocytes', 'dendritic',
+    'lymphocyte', 'lymphocytes', 'erythrocyte', 'erythrocytes',
+    'neutrophil', 'neutrophils', 'eosinophil', 'basophil',
+    'platelet', 'platelets',
+    # Other tissue
+    'fibroblast', 'fibroblasts', 'epithelial', 'endothelial',
+    'hepatocyte', 'hepatocytes', 'cardiomyocyte', 'cardiomyocytes',
+    'pericyte', 'pericytes', 'schwann',
+    # Common prefix / pan terms
+    'pan', 'panglia', 'panneuron',
+}
+
+# Suffixes that — when found at word-end — strongly suggest a cell type
+_CELL_TYPE_SUFFIXES = ('cyte', 'blast', 'glia', 'neuron', 'phage', 'phil')
+
+_VALUE_TOKEN_RE = re.compile(r'[A-Za-z]+')
+
+
+def _cell_type_score(values):
+    """Return fraction of values that look like cell type labels (0.0–1.0).
+
+    Each value is tokenised on non-alpha boundaries; a value scores a hit if
+    any token matches the cell-type vocabulary or ends with a cell-type suffix.
+    """
+    if not values:
+        return 0.0
+    hits = 0
+    for v in values:
+        tokens = [t.lower() for t in _VALUE_TOKEN_RE.findall(str(v))]
+        if any(t in _CELL_TYPE_TOKENS or t.endswith(_CELL_TYPE_SUFFIXES)
+               for t in tokens):
+            hits += 1
+    return hits / len(values)
+
+
+# ---------------------------------------------------------------------------
+# Functional dependency check (strict or majority-vote relaxed)
+# ---------------------------------------------------------------------------
+
+# Fraction of rows that must agree on the parent label for a given child value.
+# 1.0 = strict (original behaviour); lower values allow "pan-" / "stressed-"
+# type labels that don't map perfectly to one parent.
+_MV_THRESHOLD = 0.7
+
+
+def _is_functional(pairs, C, P, threshold=_MV_THRESHOLD):
+    """Return True if C → P is a functional dependency at the given threshold.
+
+    For each unique value of C, the most-common value of P must account for
+    at least `threshold` of that group's rows.  At threshold=1.0 this is
+    identical to the original strict test.
+    """
+    for _, group in pairs.groupby(C)[P]:
+        top_frac = group.value_counts(normalize=True).iloc[0]
+        if top_frac < threshold:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +252,7 @@ def detect_leaf_column(df):
             pairs = df[[C, P]].dropna()
             if len(pairs) == 0:
                 continue
-            if (pairs.groupby(C)[P].nunique() == 1).all():
+            if _is_functional(pairs, C, P):
                 has_child.add(P)
                 break  # P has at least one child; no need to check further
 
@@ -190,6 +272,8 @@ def detect_leaf_column(df):
 
     selected = max(leaves, key=lambda c: (
         bool(_REVISED_PATTERN.search(c)),
+        _cell_type_score(df[c].dropna().unique().tolist()) >= 0.3,
+        nunique[c],
         candidates.index(c)
     ))
     lines.append(f"  Selected: '{selected}' ({nunique[selected]} unique labels)")
@@ -208,7 +292,7 @@ def detect_full_hierarchy(df):
     with the most unique values (closest in granularity).
 
     C is a valid parent of P when:
-      - every unique value of C maps to exactly one value of P
+      - for every unique value of C, ≥ _MV_THRESHOLD of its rows agree on one value of P
       - C has strictly more unique values than P
 
     Returns:
@@ -254,7 +338,7 @@ def detect_full_hierarchy(df):
             pairs = df[[C, P]].dropna()
             if len(pairs) == 0:
                 continue
-            if (pairs.groupby(C)[P].nunique() == 1).all():
+            if _is_functional(pairs, C, P):
                 if nunique[P] > best_nunique:
                     best_nunique = nunique[P]
                     best_parent = P
