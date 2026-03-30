@@ -181,7 +181,7 @@ import requests
 
 from evaluate import build_label_mapping, resolve_name
 from obo_parser import parse_obo_names
-from annotate_cl_terms import fuzzy_normalize, query_llm_mapping, query_llm_ancestor, query_llm_label, FatalAPIError
+from annotate_cl_terms import fuzzy_normalize, query_llm_mapping, query_llm_ancestor, query_llm_label, FatalAPIError, _load_prompt
 from column_hierarchy import _is_cl_id, _is_metadata_column, _get_cellxgene_cols, detect_leaf_column, _is_functional
 
 
@@ -239,13 +239,7 @@ def extract_cell_type_glossary(pdf_text, api='claude'):
     if len(words) > 6000:
         pdf_text = ' '.join(words[:6000]) + ' [truncated]'
 
-    prompt = (
-        f"The following is text from a single-cell transcriptomics paper. "
-        f"Extract a compact glossary of all cell type labels, abbreviations, "
-        f"and their plain English meanings described in the paper. "
-        f"Format: one entry per line as 'LABEL: plain English name'. "
-        f"Include only cell types, not other abbreviations.\n\n{pdf_text}"
-    )
+    prompt = _load_prompt("glossary_extraction.txt", pdf_text=pdf_text)
     def _call():
         if api == 'claude':
             import anthropic

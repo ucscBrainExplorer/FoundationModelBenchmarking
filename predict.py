@@ -10,7 +10,7 @@ Usage:
     --index indices/index_ivfflat.faiss \
     --ref_annot reference_data/prediction_obs.tsv \
     --obo reference_data/cl.obo \
-    --embeddings test_data/dataset.npy \
+    --qembeddings test_data/dataset.npy \
     --metadata test_data/dataset_prediction_obs.tsv \
     --k 30 \
     --output predictions/output.tsv
@@ -37,8 +37,8 @@ def build_parser():
                         help="Reference annotation TSV (needs cell_label_ontology_term_id+cell_label, or cell_type_ontology_term_id+cell_type)")
     parser.add_argument("--obo", type=str, required=True,
                         help="Cell Ontology OBO file (CL ID -> canonical name mapping)")
-    parser.add_argument("--embeddings", type=str, required=True,
-                        help="Test embeddings file (.npy)")
+    parser.add_argument("--qembeddings", type=str, required=True,
+                        help="Test embeddings file (.npy or *_uce.h5ad — extracts obsm['X_uce'])")
     parser.add_argument("--metadata", type=str, default=None,
                         help="Optional test metadata TSV. All columns will be included in output.")
     parser.add_argument("--method", type=str, default="distance_weighted_knn",
@@ -93,8 +93,16 @@ def main():
     obsolete_comment = f"# Obsolete terms resolved: {n_replaced} replaced, {n_unresolvable} unresolvable (no replacement in OBO)\n"
 
     # 4. Load embeddings (medium cost)
-    print(f"Loading embeddings from {args.embeddings}...")
-    embeddings = np.load(args.embeddings)
+    print(f"Loading embeddings from {args.qembeddings}...")
+    if args.qembeddings.endswith('_uce.h5ad'):
+        import anndata
+        adata = anndata.read_h5ad(args.qembeddings, backed='r')
+        if 'X_uce' not in adata.obsm:
+            print(f"Error: h5ad file does not contain adata.obsm['X_uce']")
+            sys.exit(1)
+        embeddings = np.array(adata.obsm['X_uce']).astype(np.float32)
+    else:
+        embeddings = np.load(args.qembeddings)
     n_cells = embeddings.shape[0]
     print(f"  Loaded {n_cells} embeddings (dimension: {embeddings.shape[1]})")
 
@@ -224,7 +232,7 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
     with open(args.output, 'w') as f:
         f.write(f"# Reference annotations: {args.ref_annot} ({len(ref_df)} cells)\n")
-        f.write(f"# Query embeddings: {args.embeddings} ({n_cells} cells, {embedding_dim}d)\n")
+        f.write(f"# Query embeddings: {args.qembeddings} ({n_cells} cells, {embedding_dim}d)\n")
         f.write(f"# FAISS index: {args.index} ({index.ntotal} vectors, {index.d}d)\n")
         f.write(f"# OBO file: {args.obo} ({len(cl_names)} terms)\n")
         f.write(f"# k: {args.k}\n")

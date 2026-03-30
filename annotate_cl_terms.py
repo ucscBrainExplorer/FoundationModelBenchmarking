@@ -33,6 +33,16 @@ def _is_retryable(err_str):
 
 from obo_parser import parse_obo_names
 
+_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
+def _load_prompt(filename, **kwargs):
+    """Load a prompt template from the prompts/ directory and substitute {placeholders}."""
+    with open(os.path.join(_PROMPTS_DIR, filename)) as f:
+        text = f.read()
+    for key, value in kwargs.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -109,46 +119,9 @@ def query_llm_mapping(name, cl_terms_subset, api="claude", paper_context=None):
     candidates = "\n".join(f"  {cl_id}: {cl_name}"
                            for cl_id, cl_name in sorted(cl_terms_subset.items()))
 
-    context_line = (
-        f"Biological context: {paper_context}\n"
-        if paper_context else ""
-    )
-    prompt = (
-        f"Given the cell type name \"{name}\", which Cell Ontology (CL) term "
-        f"is the best match from this list?\n\n{candidates}\n\n"
-        f"{context_line}"
-        f"Rules:\n"
-        f"- HARD RULE: If the label contains a marker gene (e.g. VIP, SST, PV, SNCG, "
-        f"LAMP5, PVALB, CCK, NPY, CR, CB, CALB1, CALB2, RELN, TH, CHAT, GAD1, GAD2), "
-        f"you MUST choose the term that includes that marker gene name. Do NOT choose a "
-        f"broader lineage or origin term (e.g. 'caudal ganglionic eminence derived "
-        f"interneuron') when a marker-specific term (e.g. 'VIP GABAergic interneuron', "
-        f"'sst GABAergic interneuron') is available in the candidate list. The marker "
-        f"gene takes priority over lineage origin.\n"
-        f"- HARD RULE: If the label or description contains a distinctive biological word "
-        f"(e.g. 'tripotential', 'corticothalamic', 'intratelencephalic') that appears "
-        f"verbatim in a candidate term's name, strongly prefer that term over a generic "
-        f"alternative (e.g. 'neural progenitor cell', 'neuron').\n"
-        f"- Prefer the most specific term that captures ALL meaningful parts of the label "
-        f"(e.g. cell class, brain region, maturity state, origin).\n"
-        f"- Do NOT choose a generic term (e.g. 'neuron', 'immature neuron') if the label "
-        f"encodes additional specificity that the generic term ignores.\n"
-        f"- Do NOT choose a term that adds specificity absent from the label. "
-        f"For example, if the label says 'IT neuron' without mentioning a layer, "
-        f"do NOT pick 'L2/3 IT neuron' or 'L5 IT neuron' — reply NONE instead and let the "
-        f"ancestor fallback find the right parent term.\n"
-        f"- Do NOT choose a term restricted to a specific organ or tissue "
-        f"(e.g. 'pancreas', 'liver', 'kidney', 'heart', 'lung', 'blood', 'retina') "
-        f"unless that organ is explicitly named in the label or context.\n"
-        f"- Only select a term if you are confident it is biologically correct.\n"
-        f"- Novel or recently described cell types may not have a CL term — reply NONE.\n"
-        f"- If no term captures the full specificity of the label, reply NONE.\n"
-        f"- HARD RULE: If the label refers to a tissue region, anatomical structure, or "
-        f"developmental zone (e.g. 'Cortical Hem', 'Ventricular Zone', 'Ganglionic "
-        f"Eminence') rather than a specific cell identity, reply NONE — anatomical "
-        f"structures are not cell types.\n"
-        f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
-    )
+    context_line = f"Biological context: {paper_context}\n" if paper_context else ""
+    prompt = _load_prompt("cl_term_match.txt", name=name, candidates=candidates,
+                          context_line=context_line)
 
     try:
         if api == "claude":
@@ -223,41 +196,9 @@ def query_llm_ancestor(name, cl_terms_subset, api="claude", paper_context=None):
     """
     candidates = "\n".join(f"  {cl_id}: {cl_name}"
                            for cl_id, cl_name in sorted(cl_terms_subset.items()))
-    context_line = (
-        f"Biological context: {paper_context}\n"
-        if paper_context else ""
-    )
-    prompt = (
-        f"The cell type label \"{name}\" could not be matched to a specific CL term. "
-        f"Find the closest ancestor (parent) CL term from this list that is biologically "
-        f"valid, even if less specific. You may ignore maturity qualifiers (e.g. 'immature', "
-        f"'newborn'), sub-region qualifiers, or origin qualifiers to find the best match. "
-        f"For example, 'immature intratelencephalic excitatory neuron' → "
-        f"'intratelencephalic-projecting glutamatergic cortical neuron'.\n\n"
-        f"{candidates}\n\n"
-        f"{context_line}"
-        f"Rules:\n"
-        f"- Choose the most specific term that is still biologically correct.\n"
-        f"- Do NOT add specificity absent from the label. If the label does not name a "
-        f"specific brain region (e.g. 'primary motor cortex', 'striatum', 'medulla', "
-        f"'L5') or a specific organ (e.g. 'kidney', 'liver', 'lung', 'heart'), "
-        f"do NOT choose a term restricted to that region or organ.\n"
-        f"- Do NOT choose 'cell' or 'neuron' alone — these are too generic.\n"
-        f"- Do NOT choose a mature cell type for a label that indicates a progenitor, "
-        f"precursor, or intermediate progenitor cell (IPC). A progenitor label must map "
-        f"to a progenitor or stem cell CL term, not its downstream progeny.\n"
-        f"- ALWAYS prefer species-agnostic terms over species-specific ones. "
-        f"If a term ending in '(Homo sapiens)', '(Mus musculus)', or any other species "
-        f"name is in the list, check whether a species-agnostic parent term also exists "
-        f"in the list and use that instead. Only use a species-specific term if no "
-        f"species-agnostic equivalent is present in the candidate list.\n"
-        f"- HARD RULE: If the label refers to a tissue region, anatomical structure, or "
-        f"developmental zone (e.g. 'Cortical Hem', 'Ventricular Zone', 'Ganglionic "
-        f"Eminence') rather than a specific cell identity, reply NONE — anatomical "
-        f"structures are not cell types.\n"
-        f"- If no reasonable ancestor exists, reply NONE.\n"
-        f"Reply with ONLY the CL term ID (e.g. CL:0000540) or NONE, nothing else."
-    )
+    context_line = f"Biological context: {paper_context}\n" if paper_context else ""
+    prompt = _load_prompt("cl_term_ancestor.txt", name=name, candidates=candidates,
+                          context_line=context_line)
 
     try:
         if api == "claude":
@@ -325,23 +266,8 @@ def query_llm_label(name, api="claude", paper_context=None):
     Returns:
         Plain English description string, or None on failure.
     """
-    context_line = (
-        f"The label comes from this study: {paper_context} "
-        if paper_context else ""
-    )
-    prompt = (
-        f"You are an expert in single-cell transcriptomics and cell biology. "
-        f"The following label comes from a scRNA-seq dataset and may use abbreviated "
-        f"or shorthand nomenclature common in neuroscience or developmental biology "
-        f"(e.g. 'RG-oRG' = outer radial glial cell, 'EN-L2_3-IT' = excitatory "
-        f"intratelencephalic neuron of cortical layer 2/3, 'IN-dLGE' = inhibitory "
-        f"neuron from dorsal lateral ganglionic eminence). "
-        f"{context_line}"
-        f"If you are confident you recognise the cell type, return a concise plain "
-        f"English name (no longer than 10 words, no trailing punctuation). "
-        f"If you are not confident, return the label exactly as given — do NOT guess. "
-        f"Label: \"{name}\""
-    )
+    context_line = f"The label comes from this study: {paper_context} " if paper_context else ""
+    prompt = _load_prompt("cl_label_description.txt", name=name, context_line=context_line)
 
     try:
         if api == "claude":

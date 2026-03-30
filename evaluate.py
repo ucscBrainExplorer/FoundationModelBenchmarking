@@ -524,12 +524,16 @@ def main():
     print(f"\n{'=' * 60}")
     print("EVALUATION SUMMARY")
     print(f"{'=' * 60}")
+    def sig2(x):
+        from decimal import Decimal
+        return float(f"{x:.2g}")
+
     print(f"Cells evaluated: {len(predictions)}")
-    print(f"Exact CL term match rate: {exact_match_rate:.2f}")
+    print(f"Exact CL term match rate: {sig2(exact_match_rate)}")
     valid_scores = [s for s in per_cell_scores if not (s != s)]  # filter NaN
     if valid_scores:
-        print(f"Mean ontology {metric_noun}: {stats['mean']:.2f}")
-        print(f"Median ontology {metric_noun}: {stats['median']:.2f}")
+        print(f"Mean ontology {metric_noun}: {sig2(stats['mean'])}")
+        print(f"Median ontology {metric_noun}: {sig2(stats['median'])}")
     else:
         print(f"No valid ontology {metric_noun} scores computed")
     print(f"{'=' * 60}")
