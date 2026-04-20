@@ -25,7 +25,6 @@ The suite has four composable CLI programs:
 | `predict.py` | Predict cell types via FAISS KNN (no ground truth needed) |
 | `evaluate.py` | Score predictions against ground truth using ontology metrics |
 | `annotate_cl_terms.py` | Map readable cell type names to CL ontology term IDs |
-| `generate_remap.py` | Auto-generate a label remap table from a ground truth file |
 
 ---
 
@@ -69,27 +68,6 @@ python3 evaluate.py \
   --predictions annotated.tsv \
   --ground_truth ground_truth.tsv \
   --obo reference_data/cl.obo \
-  --output-dir evaluation_results/
-```
-
-### Workflow C: Remap Ground Truth Labels
-
-When the ground truth file uses coarse cellxgene CL labels but also contains finer author annotations:
-
-```bash
-# Generate a remap table from the finer annotation column
-python3 generate_remap.py \
-  --input ground_truth.tsv \
-  --obo reference_data/cl.obo \
-  --output remap.tsv \
-  --column annot_level_3
-
-# Evaluate with remap applied to ground truth
-python3 evaluate.py \
-  --predictions predictions.tsv \
-  --ground_truth ground_truth.tsv \
-  --obo reference_data/cl.obo \
-  --remap-file remap.tsv \
   --output-dir evaluation_results/
 ```
 
@@ -140,7 +118,7 @@ Evaluates predictions against ground truth row-by-row. Both files must have the 
 --ontology-method   ic | shortest_path                             [default: ic]
 --pred_id_col       CL term ID column in predictions file          [default: predicted_cell_type_ontology_term_id]
 --truth_id_col      CL term ID column in ground truth file         [default: cell_type_ontology_term_id]
---remap-file        Remap TSV from generate_remap.py               [optional]
+--remap-file        Remap TSV                                        [optional]
 --output-dir        Output directory                               [default: evaluation_results/]
 ```
 
@@ -179,23 +157,6 @@ Set `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` for LLM fallback. Without API ke
 **Output:** Original TSV with an added `cell_type_ontology_term_id` column.
 
 ---
-
-### `generate_remap.py`
-
-Scans a ground truth file, auto-detects the best annotation column, and writes a remap TSV mapping each label to a CL term ID. The output is fed to `evaluate.py --remap-file`.
-
-This is useful when the ground truth uses coarse cellxgene CL labels but the file also contains finer author annotations (e.g. `annot_level_3`).
-
-```
---input       Ground truth TSV              [required]
---obo         Cell Ontology OBO file        [required]
---output      Output remap TSV path         [required]
---column      Annotation column to use (auto-detected if omitted)
---min-score   Minimum resolvability fraction to accept a column   [default: 0.10]
---use-llm     Use LLM to resolve unmatched labels (requires API key)
-```
-
-The tool also detects hierarchical parent columns (e.g., broad cell class → subtype) and reports the Most Informative Common Ancestor (MICA) within each parent group to flag inconsistent mappings.
 
 ---
 
@@ -306,7 +267,6 @@ FoundationModelBenchmarking/
 ├── predict.py                     # KNN prediction
 ├── evaluate.py                    # Ontology-based evaluation
 ├── annotate_cl_terms.py           # Name → CL ID annotation
-├── generate_remap.py              # Ground truth label remapping
 │
 ├── data_loader.py                 # FAISS + annotation loading
 ├── prediction_module.py           # KNN voting logic

@@ -46,6 +46,8 @@ def build_parser():
                         help="Voting method (default: distance_weighted_knn)")
     parser.add_argument("--k", type=int, default=30,
                         help="Number of nearest neighbors (default: 30)")
+    parser.add_argument("--exclude_top1", action="store_true",
+                        help="Exclude the top-1 nearest neighbor before voting (use when query is in the index, e.g. v3 vs v3)")
     parser.add_argument("--output", type=str, default="predictions.tsv",
                         help="Output TSV path (default: predictions.tsv)")
     return parser
@@ -147,10 +149,14 @@ def main():
         sys.exit(1)
 
     # 7. Query FAISS
-    print(f"Querying FAISS index (k={args.k})...")
-    squared_dists, neighbor_indices = execute_query(index, embeddings, k=args.k)  # euclidean (L2)
+    fetch_k = args.k + 1 if args.exclude_top1 else args.k
+    print(f"Querying FAISS index (k={fetch_k}{', excluding top-1' if args.exclude_top1 else ''})...")
+    squared_dists, neighbor_indices = execute_query(index, embeddings, k=fetch_k)  # euclidean (L2)
     # FAISS L2 indices return squared Euclidean distances; convert to true Euclidean
     dists = np.sqrt(np.maximum(squared_dists, 0))
+    if args.exclude_top1:
+        neighbor_indices = neighbor_indices[:, 1:]
+        dists = dists[:, 1:]
     print(f"  Query complete for {n_cells} cells")
 
     run_mv = args.method in ('majority_voting', 'both')
