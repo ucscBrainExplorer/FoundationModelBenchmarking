@@ -128,10 +128,10 @@ def distance_weighted_knn_vote(weights: np.ndarray, neighbor_labels: np.ndarray)
         order = np.argsort(scores)[::-1]
 
         top1.append(uniq[order[0]])
-        top1_scores.append(scores[order[0]] / total)
+        top1_scores.append(min(scores[order[0]] / total, 1.0))
         if len(order) > 1:
             top2.append(uniq[order[1]])
-            top2_scores.append(scores[order[1]] / total)
+            top2_scores.append(min(scores[order[1]] / total, 1.0))
         else:
             top2.append('')
             top2_scores.append(float('nan'))
