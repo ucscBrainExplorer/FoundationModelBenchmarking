@@ -33,13 +33,13 @@ from collections import Counter
 
 
 LABEL_COLS = [
-    'cell_type',
-    'cell_label',
-    'cell_type_original',
-    'mapped_cell_type',
-    'mapped_cell_label',
-    'harmonized_cell_type',
     'harmonized_cell_label',
+    'harmonized_cell_type',
+    'mapped_cell_label',
+    'mapped_cell_type',
+    'cell_type_original',
+    'cell_label',
+    'cell_type',
 ]
 
 
@@ -217,9 +217,10 @@ def build_parser():
     parser.add_argument('--index',     required=True, help='FAISS index file (.faiss)')
     parser.add_argument('--adata',     required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
     parser.add_argument('--ref_annot', required=True,
-                        help='Reference metadata TSV — any of these columns found will be predicted: '
-                             'cell_type, cell_label, cell_type_original, mapped_cell_type, '
-                             'mapped_cell_label, harmonized_cell_type, harmonized_cell_label')
+                        help='Reference metadata TSV — any of these columns found will be predicted '
+                             '(in this order): harmonized_cell_label, harmonized_cell_type, '
+                             'mapped_cell_label, mapped_cell_type, cell_type_original, '
+                             'cell_label, cell_type')
     parser.add_argument('--method',    default='distance_weighted_knn',
                         choices=['majority_voting', 'distance_weighted_knn'],
                         help='Voting method (default: distance_weighted_knn)')

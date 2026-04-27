@@ -16,8 +16,7 @@ against a UCE reference atlas.
 |---|---|
 | `*.faiss` | FAISS index of reference UCE embeddings |
 | `*_uce_adata.h5ad` | Query dataset; embeddings in `adata.obsm["X_uce"]` |
-| `ref_obs.tsv(.gz)` | Reference metadata TSV; must contain `cell_type_ontology_term_id` |
-| `cl.obo` | Cell Ontology OBO file for translating CL IDs to readable names |
+| `ref_obs.tsv(.gz)` | Reference metadata TSV; must contain at least one recognized label column (see below) |
 
 Demo data for all inputs is in `demodata/`.
 
@@ -28,6 +27,21 @@ Demo data for all inputs is in `demodata/`.
 Assigns cell type labels by querying a FAISS index and voting among the k nearest
 reference neighbors. Outputs top-1 and top-2 predictions per cell.
 
+All recognized label columns present in the reference TSV are predicted in a single
+run. Output columns are prefixed by the source column name.
+
+### Recognized label columns (predicted in this order)
+
+```
+harmonized_cell_label
+harmonized_cell_type
+mapped_cell_label
+mapped_cell_type
+cell_type_original
+cell_label
+cell_type
+```
+
 ### Usage
 
 ```bash
@@ -35,7 +49,8 @@ python3 predict.py \
   --index     demodata/index_ivfflat.faiss \
   --adata     demodata/query_uce_adata.h5ad \
   --ref_annot demodata/ref_obs.tsv.gz \
-  --obo       demodata/cl-basic.obo \
+  --method    distance_weighted_knn \
+  --output    labels.tsv
 ```
 
 ### Arguments
@@ -44,8 +59,7 @@ python3 predict.py \
 |---|---|---|---|
 | `--index` | yes | — | FAISS index file (`.faiss`) |
 | `--adata` | yes | — | Query h5ad file with `adata.obsm["X_uce"]` |
-| `--ref_annot` | yes | — | Reference metadata TSV (needs `cell_type_ontology_term_id`) |
-| `--obo` | yes | — | Cell Ontology OBO file (`cl.obo`) |
+| `--ref_annot` | yes | — | Reference metadata TSV with at least one recognized label column |
 | `--method` | no | `distance_weighted_knn` | Voting method (see below) |
 | `--k` | no | `30` | Number of nearest neighbors |
 | `--output` | no | `labels.tsv` | Output TSV path |
@@ -56,43 +70,32 @@ python3 predict.py \
 |---|---|
 | `distance_weighted_knn` | Neighbors weighted by Gaussian kernel of distance; closer neighbors count more |
 | `majority_voting` | Each neighbor gets one equal vote |
-| `both` | Run both methods and output all columns side by side |
 
 `distance_weighted_knn` is the default and recommended method.
 
 ### Output columns
 
-**Both methods** always produce:
+For each recognized label column found in the reference TSV, four columns are added
+to the output (example for `harmonized_cell_label` with `distance_weighted_knn`):
+
+| Column | Description |
+|---|---|
+| `harmonized_cell_label_pred` | Top-1 predicted label |
+| `harmonized_cell_label_weighted_score` | Normalized weight fraction for top-1 (0–1) |
+| `harmonized_cell_label_pred_2` | Top-2 predicted label |
+| `harmonized_cell_label_weighted_score_2` | Normalized weight fraction for top-2 |
+
+For `majority_voting`, score columns are named `{col}_score` / `{col}_score_2`
+(no `weighted` prefix).
+
+Additional columns always present:
 
 | Column | Description |
 |---|---|
 | `cell_id` | Cell barcode from `adata.obs_names` |
 | `mean_euclidean_distance` | Mean distance to all k neighbors |
 
-**`distance_weighted_knn`** columns (prefix `weighted_`):
-
-| Column | Description |
-|---|---|
-| `weighted_cell_type_ontology_term_id` | Top-1 predicted CL term ID |
-| `weighted_cell_type` | Top-1 predicted cell type (human-readable) |
-| `weighted_score` | Normalized weight fraction for top-1 (0–1) |
-| `weighted_cell_type_ontology_term_id_2` | Top-2 predicted CL term ID |
-| `weighted_cell_type_2` | Top-2 predicted cell type |
-| `weighted_score_2` | Normalized weight fraction for top-2 |
-
-**`majority_voting`** columns (prefix `mv_`):
-
-| Column | Description |
-|---|---|
-| `mv_cell_type_ontology_term_id` | Top-1 predicted CL term ID |
-| `mv_cell_type` | Top-1 predicted cell type (human-readable) |
-| `mv_score` | Vote fraction for top-1 (0–1) |
-| `mv_cell_type_ontology_term_id_2` | Top-2 predicted CL term ID |
-| `mv_cell_type_2` | Top-2 predicted cell type |
-| `mv_score_2` | Vote fraction for top-2 |
-
-The output file includes a `#`-prefixed provenance header tracking all inputs and
-parameters used.
+The output file includes a `#`-prefixed provenance header tracking inputs and parameters.
 
 ---
 
@@ -115,7 +118,7 @@ A well-mapped query dataset should sit clearly between null and reference self-K
 python3 distance_analysis.py \
   --labels    labels.tsv \
   --adata     demodata/query_uce_adata.h5ad \
-  --index     demodata/index_ivfflat.faiss \
+  --index     demodata/index_ivfflat.faiss
 ```
 
 ### Arguments
@@ -138,8 +141,7 @@ python3 distance_analysis.py \
 python3 predict.py \
   --index     demodata/index_ivfflat.faiss \
   --adata     demodata/query_uce_adata.h5ad \
-  --ref_annot demodata/ref_obs.tsv.gz \
-  --obo       demodata/cl-basic.obo
+  --ref_annot demodata/ref_obs.tsv.gz
 
 python3 distance_analysis.py \
   --labels  labels.tsv \
@@ -159,7 +161,6 @@ python3 predict.py \
   --index     demodata/index_ivfflat.faiss \
   --adata     demodata/query_uce_adata.h5ad \
   --ref_annot demodata/ref_obs.tsv.gz \
-  --obo       demodata/cl-basic.obo \
   --output    labels.tsv
 
 # Step 2 — assess mapping quality
