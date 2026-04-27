@@ -7,6 +7,7 @@ Two voting methods are available:
   distance_weighted_knn — neighbors weighted by Gaussian kernel of distance (default)
 
 All columns in the reference TSV are predicted except those ending with _term_id.
+Output columns use the naming convention prediction_by_<col>_top1/top1_score/top2/top2_score.
 Output column order follows the ref TSV column order.
 
 Usage:
@@ -260,18 +261,14 @@ def main():
             neighbor_labels = np.vectorize(lambda i: term_ids[i] if i >= 0 else '')(indices)
             neighbor_labels = np.where(np.isfinite(dists) & (indices >= 0), neighbor_labels, '')
             top1, top1_scores, top2, top2_scores = distance_weighted_knn_vote(weights, neighbor_labels)
-            score_col  = f'{col}_weighted_score'
-            score_col2 = f'{col}_weighted_score_2'
         else:
             top1, top1_scores, top2, top2_scores = majority_voting(indices, dists, term_ids)
-            score_col  = f'{col}_score'
-            score_col2 = f'{col}_score_2'
 
-        cols[f'{col}_pred']   = top1
-        cols[score_col]       = top1_scores
-        cols[f'{col}_pred_2'] = top2
-        cols[score_col2]      = top2_scores
-        all_top1[col]         = top1
+        cols[f'prediction_by_{col}_top1']       = top1
+        cols[f'prediction_by_{col}_top1_score'] = top1_scores
+        cols[f'prediction_by_{col}_top2']       = top2
+        cols[f'prediction_by_{col}_top2_score'] = top2_scores
+        all_top1[col]                           = top1
 
     cols['mean_euclidean_distance'] = mean_distances
 
