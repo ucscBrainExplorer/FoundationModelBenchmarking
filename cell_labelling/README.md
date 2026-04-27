@@ -8,6 +8,7 @@ against a UCE reference atlas.
 | Script | Purpose |
 |---|---|
 | `predict.py` | Assign cell type labels to query cells |
+| `join_predictions.py` | Join predicted labels with query h5ad obs table |
 | `distance_analysis.py` | Assess mapping quality via distance distributions |
 
 ## Inputs
@@ -27,20 +28,8 @@ Demo data for all inputs is in `demodata/`.
 Assigns cell type labels by querying a FAISS index and voting among the k nearest
 reference neighbors. Outputs top-1 and top-2 predictions per cell.
 
-All recognized label columns present in the reference TSV are predicted in a single
-run. Output columns are prefixed by the source column name.
-
-### Recognized label columns (predicted in this order)
-
-```
-harmonized_cell_label
-harmonized_cell_type
-mapped_cell_label
-mapped_cell_type
-cell_type_original
-cell_label
-cell_type
-```
+All columns in the reference TSV are predicted except those ending with `_term_id`.
+Column order in the output follows the ref TSV column order.
 
 ### Usage
 
@@ -96,6 +85,30 @@ Additional columns always present:
 | `mean_euclidean_distance` | Mean distance to all k neighbors |
 
 The output file includes a `#`-prefixed provenance header tracking inputs and parameters.
+
+---
+
+## join_predictions.py
+
+Joins the `labels.tsv` output from `predict.py` with the query h5ad obs table,
+producing a single TSV with all metadata and predictions together.
+
+### Usage
+
+```bash
+python3 join_predictions.py \
+  --labels  labels.tsv \
+  --adata   query_uce_adata.h5ad \
+  --output  predictions_with_obs.tsv
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--labels` | yes | — | `labels.tsv` output from `predict.py` |
+| `--adata` | yes | — | Query h5ad file (obs table joined on `cell_id`) |
+| `--output` | no | `predictions_with_obs.tsv` | Output TSV path |
 
 ---
 
@@ -163,7 +176,13 @@ python3 predict.py \
   --ref_annot demodata/ref_obs.tsv.gz \
   --output    labels.tsv
 
-# Step 2 — assess mapping quality
+# Step 2 — join predictions with query obs
+python3 join_predictions.py \
+  --labels  labels.tsv \
+  --adata   demodata/query_uce_adata.h5ad \
+  --output  predictions_with_obs.tsv
+
+# Step 3 — assess mapping quality
 python3 distance_analysis.py \
   --labels  labels.tsv \
   --adata   demodata/query_uce_adata.h5ad \

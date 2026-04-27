@@ -6,8 +6,8 @@ Two voting methods are available:
   majority_voting       — each neighbor gets one vote
   distance_weighted_knn — neighbors weighted by Gaussian kernel of distance (default)
 
-All label columns present in the reference TSV that match the allowed list are
-predicted in a single run. Output columns are prefixed by the source column name.
+All columns in the reference TSV are predicted except those ending with _term_id.
+Output column order follows the ref TSV column order.
 
 Usage:
   python3 predict.py \
@@ -30,17 +30,6 @@ import pandas as pd
 import anndata
 import faiss
 from collections import Counter
-
-
-LABEL_COLS = [
-    'harmonized_cell_label',
-    'harmonized_cell_type',
-    'mapped_cell_label',
-    'mapped_cell_type',
-    'cell_type_original',
-    'cell_label',
-    'cell_type',
-]
 
 
 # ---------------------------------------------------------------------------
@@ -71,17 +60,14 @@ def load_adata(path: str):
 def load_ref_annot(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Reference annotations not found: {path}")
-    df = pd.read_csv(path, sep='\t')
-    validate_ref_columns(df)
-    return df
+    return pd.read_csv(path, sep='\t', low_memory=False)
 
 
-def validate_ref_columns(ref_df: pd.DataFrame) -> None:
-    found = [c for c in LABEL_COLS if c in ref_df.columns]
-    if not found:
-        raise ValueError(
-            f"Reference TSV must contain at least one of: {LABEL_COLS}"
-        )
+def get_label_cols(ref_df: pd.DataFrame) -> list:
+    cols = [c for c in ref_df.columns if not c.endswith('_term_id')]
+    if not cols:
+        raise ValueError("Reference TSV has no columns to predict on (all end with _term_id)")
+    return cols
 
 
 def resolve_labels(ref_df: pd.DataFrame, col: str) -> np.ndarray:
@@ -115,8 +101,8 @@ def distance_weighted_knn_vote(weights: np.ndarray, neighbor_labels: np.ndarray)
     Aggregate Gaussian kernel weights by cell label, return top-2.
 
     Parameters:
-        weights          — (N, k) weight array
-        neighbor_labels  — (N, k) string array of cell labels
+        weights         — (N, k) weight array
+        neighbor_labels — (N, k) string array of cell labels
 
     Returns:
         top1, top1_scores, top2, top2_scores — each length-N list
@@ -128,8 +114,8 @@ def distance_weighted_knn_vote(weights: np.ndarray, neighbor_labels: np.ndarray)
     for row_weights, row_labels in zip(weights, neighbor_labels):
         valid_mask = np.array([t != '' for t in row_labels])
         if not np.any(valid_mask):
-            top1.append('');        top1_scores.append(float('nan'))
-            top2.append('');        top2_scores.append(float('nan'))
+            top1.append('');   top1_scores.append(float('nan'))
+            top2.append('');   top2_scores.append(float('nan'))
             continue
 
         vw = row_weights[valid_mask]
@@ -163,9 +149,9 @@ def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, te
     Majority vote among k neighbors, return top-2 per cell.
 
     Parameters:
-        neighbor_indices  — (N, k) FAISS indices
-        neighbor_dists    — (N, k) Euclidean distances (sorted closest first)
-        term_ids          — reference label array aligned to FAISS index
+        neighbor_indices — (N, k) FAISS indices
+        neighbor_dists   — (N, k) Euclidean distances (sorted closest first)
+        term_ids         — reference label array aligned to FAISS index
 
     Returns:
         top1, top1_scores, top2, top2_scores — each length-N list
@@ -217,10 +203,8 @@ def build_parser():
     parser.add_argument('--index',     required=True, help='FAISS index file (.faiss)')
     parser.add_argument('--adata',     required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
     parser.add_argument('--ref_annot', required=True,
-                        help='Reference metadata TSV — any of these columns found will be predicted '
-                             '(in this order): harmonized_cell_label, harmonized_cell_type, '
-                             'mapped_cell_label, mapped_cell_type, cell_type_original, '
-                             'cell_label, cell_type')
+                        help='Reference metadata TSV — all columns except those ending '
+                             'with _term_id are predicted, in ref TSV column order')
     parser.add_argument('--method',    default='distance_weighted_knn',
                         choices=['majority_voting', 'distance_weighted_knn'],
                         help='Voting method (default: distance_weighted_knn)')
@@ -235,9 +219,9 @@ def main():
 
     print(f"Loading reference annotations from {args.ref_annot}...")
     ref_df = load_ref_annot(args.ref_annot)
-    active_cols = [c for c in LABEL_COLS if c in ref_df.columns]
+    active_cols = get_label_cols(ref_df)
     print(f"  {len(ref_df)} reference cells")
-    print(f"  Label columns found: {active_cols}")
+    print(f"  Columns to predict: {active_cols}")
 
     print(f"Loading embeddings from {args.adata}...")
     embeddings, cell_ids = load_adata(args.adata)
@@ -261,14 +245,11 @@ def main():
     valid_dists = np.where(indices >= 0, dists, np.nan)
     mean_distances = np.nanmean(valid_dists, axis=1).tolist()
 
-    cols = {'cell_id': cell_ids}
-
     use_weighted = args.method == 'distance_weighted_knn'
-
-    # Precompute weights once if using weighted method
     if use_weighted:
-        neighbor_labels_cache = {}
         weights = gaussian_kernel_weights(np.where(indices >= 0, dists, 0.0))
+
+    cols = {'cell_id': cell_ids}
 
     last_top1 = None
     for col in active_cols:
@@ -286,10 +267,10 @@ def main():
             score_col  = f'{col}_score'
             score_col2 = f'{col}_score_2'
 
-        cols[f'{col}_pred']  = top1
-        cols[score_col]      = top1_scores
+        cols[f'{col}_pred']   = top1
+        cols[score_col]       = top1_scores
         cols[f'{col}_pred_2'] = top2
-        cols[score_col2]     = top2_scores
+        cols[score_col2]      = top2_scores
         last_top1 = top1
 
     cols['mean_euclidean_distance'] = mean_distances
