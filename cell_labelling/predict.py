@@ -250,8 +250,8 @@ def main():
         weights = gaussian_kernel_weights(np.where(indices >= 0, dists, 0.0))
 
     cols = {'cell_id': cell_ids}
+    all_top1 = {}
 
-    last_top1 = None
     for col in active_cols:
         print(f"\nVoting on '{col}' ({args.method})...")
         term_ids = resolve_labels(ref_df, col)
@@ -271,7 +271,7 @@ def main():
         cols[score_col]       = top1_scores
         cols[f'{col}_pred_2'] = top2
         cols[score_col2]      = top2_scores
-        last_top1 = top1
+        all_top1[col]         = top1
 
     cols['mean_euclidean_distance'] = mean_distances
 
@@ -291,11 +291,11 @@ def main():
         output_df.to_csv(f, sep='\t', index=False)
 
     print(f"\nSaved {n_cells} cell labels to {args.output}")
-    if last_top1 is not None:
-        n_empty = sum(1 for p in last_top1 if p == '')
-        if n_empty:
-            print(f"  Warning: {n_empty} cells had no valid neighbors for voting")
-        print(f"  Unique predicted labels ({active_cols[-1]}): {len(set(p for p in last_top1 if p))}")
+    for col, top1 in all_top1.items():
+        n_empty = sum(1 for p in top1 if p == '')
+        n_unique = len(set(p for p in top1 if p))
+        empty_str = f", {n_empty} empty" if n_empty else ""
+        print(f"  {col}: {n_unique} unique labels{empty_str}")
 
 
 if __name__ == '__main__':
