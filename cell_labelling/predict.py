@@ -3,16 +3,17 @@
 Label cells using KNN voting on UCE embeddings.
 
 Two voting methods are available:
-  majority_voting          — each neighbor gets one vote
+  majority_voting       — each neighbor gets one vote
   distance_weighted_knn — neighbors weighted by Gaussian kernel of distance (default)
-  both                   — run both and output all columns side by side
+
+All label columns present in the reference TSV that match the allowed list are
+predicted in a single run. Output columns are prefixed by the source column name.
 
 Usage:
   python3 predict.py \
     --index     path/to/index.faiss \
     --adata     path/to/dataset_uce_adata.h5ad \
     --ref_annot path/to/reference_metadata.tsv \
-    --obo       path/to/cl.obo \
     --method    distance_weighted_knn \
     --k 30 \
     --output    labels.tsv
@@ -29,6 +30,17 @@ import pandas as pd
 import anndata
 import faiss
 from collections import Counter
+
+
+LABEL_COLS = [
+    'cell_type',
+    'cell_label',
+    'cell_type_original',
+    'mapped_cell_type',
+    'mapped_cell_label',
+    'harmonized_cell_type',
+    'harmonized_cell_label',
+]
 
 
 # ---------------------------------------------------------------------------
@@ -65,86 +77,21 @@ def load_ref_annot(path: str) -> pd.DataFrame:
 
 
 def validate_ref_columns(ref_df: pd.DataFrame) -> None:
-    has_cl_id  = 'cell_label_ontology_term_id' in ref_df.columns
-    has_cl_lbl = 'cell_label' in ref_df.columns
-    has_ct_id  = 'cell_type_ontology_term_id' in ref_df.columns
-    has_ct_lbl = 'cell_type' in ref_df.columns
-
-    if has_cl_id != has_cl_lbl:
-        missing = 'cell_label' if has_cl_id else 'cell_label_ontology_term_id'
-        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
-    if has_ct_id != has_ct_lbl:
-        missing = 'cell_type' if has_ct_id else 'cell_type_ontology_term_id'
-        raise ValueError(f"Incomplete column pair: '{missing}' is missing")
-    if not (has_cl_id and has_cl_lbl) and not (has_ct_id and has_ct_lbl):
+    found = [c for c in LABEL_COLS if c in ref_df.columns]
+    if not found:
         raise ValueError(
-            "Reference annotations must contain at least one complete column pair: "
-            "('cell_label_ontology_term_id' + 'cell_label') or "
-            "('cell_type_ontology_term_id' + 'cell_type')"
+            f"Reference TSV must contain at least one of: {LABEL_COLS}"
         )
 
 
-def resolve_labels(ref_df: pd.DataFrame) -> np.ndarray:
-    if 'cell_label_ontology_term_id' in ref_df.columns:
-        id_col, lbl_col = ref_df['cell_label_ontology_term_id'], ref_df['cell_label']
-    else:
-        id_col, lbl_col = ref_df['cell_type_ontology_term_id'], ref_df['cell_type']
-
-    def _clean(col):
-        s = col.astype(str).str.strip()
-        s = s.where(col.notna(), '')
+def resolve_labels(ref_df: pd.DataFrame, col: str) -> np.ndarray:
+    def _clean(series):
+        s = series.astype(str).str.strip()
+        s = s.where(series.notna(), '')
         return s.where(s != 'nan', '')
 
-    id_s  = _clean(id_col)
-    lbl_s = _clean(lbl_col)
-    result = id_s.where(id_s != '', lbl_s)
-    return result.where(result != '', 'missing_label').values
-
-
-def parse_obo_names(obo_path: str) -> dict:
-    """Parse an OBO file and return {term_id: readable_name}."""
-    if not os.path.exists(obo_path):
-        raise FileNotFoundError(f"OBO file not found: {obo_path}")
-    cl_map = {}
-    current_id = None
-    in_term = False
-    with open(obo_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line == '[Term]':
-                in_term = True
-                current_id = None
-            elif line.startswith('[') and line.endswith(']'):
-                in_term = False
-                current_id = None
-            elif in_term:
-                if line.startswith('id: '):
-                    current_id = line[4:]
-                elif line.startswith('name: ') and current_id:
-                    cl_map[current_id] = line[6:]
-    return cl_map
-
-
-def parse_obo_replacements(obo_path: str) -> dict:
-    """Parse an OBO file and return {obsolete_id: replacement_id}."""
-    replacements = {}
-    current_id = None
-    in_term = False
-    with open(obo_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line == '[Term]':
-                in_term = True
-                current_id = None
-            elif line.startswith('[') and line.endswith(']'):
-                in_term = False
-                current_id = None
-            elif in_term:
-                if line.startswith('id: '):
-                    current_id = line[4:]
-                elif line.startswith('replaced_by: ') and current_id:
-                    replacements[current_id] = line[13:]
-    return replacements
+    cleaned = _clean(ref_df[col])
+    return cleaned.where(cleaned != '', 'missing_label').values
 
 
 # ---------------------------------------------------------------------------
@@ -163,46 +110,46 @@ def gaussian_kernel_weights(dists: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return np.exp(-dists ** 2 / (2 * sigma ** 2))
 
 
-def distance_weighted_knn_vote(weights: np.ndarray, neighbor_term_ids: np.ndarray):
+def distance_weighted_knn_vote(weights: np.ndarray, neighbor_labels: np.ndarray):
     """
-    Aggregate Gaussian kernel weights by cell type label, return top-2.
+    Aggregate Gaussian kernel weights by cell label, return top-2.
 
     Parameters:
-        weights           — (N, k) weight array
-        neighbor_term_ids — (N, k) string array of CL term IDs
+        weights          — (N, k) weight array
+        neighbor_labels  — (N, k) string array of cell labels
 
     Returns:
-        top1_ids, top1_scores, top2_ids, top2_scores — each length-N list
+        top1, top1_scores, top2, top2_scores — each length-N list
         Scores are normalized (sum of weights for winner / total weight).
     """
-    top1_ids, top1_scores = [], []
-    top2_ids, top2_scores = [], []
+    top1, top1_scores = [], []
+    top2, top2_scores = [], []
 
-    for row_weights, row_terms in zip(weights, neighbor_term_ids):
-        valid_mask = np.array([t != '' for t in row_terms])
+    for row_weights, row_labels in zip(weights, neighbor_labels):
+        valid_mask = np.array([t != '' for t in row_labels])
         if not np.any(valid_mask):
-            top1_ids.append('');   top1_scores.append(float('nan'))
-            top2_ids.append('');   top2_scores.append(float('nan'))
+            top1.append('');        top1_scores.append(float('nan'))
+            top2.append('');        top2_scores.append(float('nan'))
             continue
 
         vw = row_weights[valid_mask]
-        vt = row_terms[valid_mask]
+        vt = row_labels[valid_mask]
         total = vw.sum()
 
         uniq, inv = np.unique(vt, return_inverse=True)
         scores = np.bincount(inv, weights=vw)
         order = np.argsort(scores)[::-1]
 
-        top1_ids.append(uniq[order[0]])
+        top1.append(uniq[order[0]])
         top1_scores.append(scores[order[0]] / total)
         if len(order) > 1:
-            top2_ids.append(uniq[order[1]])
+            top2.append(uniq[order[1]])
             top2_scores.append(scores[order[1]] / total)
         else:
-            top2_ids.append('')
+            top2.append('')
             top2_scores.append(float('nan'))
 
-    return top1_ids, top1_scores, top2_ids, top2_scores
+    return top1, top1_scores, top2, top2_scores
 
 
 def knn_search(index: faiss.Index, embeddings: np.ndarray, k: int):
@@ -218,14 +165,14 @@ def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, te
     Parameters:
         neighbor_indices  — (N, k) FAISS indices
         neighbor_dists    — (N, k) Euclidean distances (sorted closest first)
-        term_ids          — reference CL term ID array aligned to FAISS index
+        term_ids          — reference label array aligned to FAISS index
 
     Returns:
-        top1_ids, top1_scores, top2_ids, top2_scores — each length-N list
+        top1, top1_scores, top2, top2_scores — each length-N list
         Scores are winner's share of valid votes (0.0-1.0).
     """
-    top1_ids, top1_scores = [], []
-    top2_ids, top2_scores = [], []
+    top1, top1_scores = [], []
+    top2, top2_scores = [], []
 
     for row_indices, row_dists in zip(neighbor_indices, neighbor_dists):
         pairs = [
@@ -238,11 +185,11 @@ def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, te
 
         if valid_labels:
             counts = Counter(valid_labels)
-            top2 = counts.most_common(2)
-            winner, count = top2[0]
+            top2_list = counts.most_common(2)
+            winner, count = top2_list[0]
             vote_pct = count / len(valid_labels)
-            if len(top2) > 1:
-                runner_up, count_2 = top2[1]
+            if len(top2_list) > 1:
+                runner_up, count_2 = top2_list[1]
                 vote_pct_2 = count_2 / len(valid_labels)
             else:
                 runner_up = ''
@@ -251,25 +198,12 @@ def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, te
             winner = runner_up = ''
             vote_pct = vote_pct_2 = float('nan')
 
-        top1_ids.append(winner)
+        top1.append(winner)
         top1_scores.append(vote_pct)
-        top2_ids.append(runner_up)
+        top2.append(runner_up)
         top2_scores.append(vote_pct_2)
 
-    return top1_ids, top1_scores, top2_ids, top2_scores
-
-
-def neighbor_distances_str(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray) -> list:
-    """Build comma-separated distance strings per cell, sorted closest to furthest."""
-    result = []
-    for row_dists, row_indices in zip(neighbor_dists, neighbor_indices):
-        pairs = sorted(
-            [(d, idx) for d, idx in zip(row_dists, row_indices)
-             if idx >= 0 and np.isfinite(d)],
-            key=lambda x: x[0]
-        )
-        result.append(','.join(f'{d:.4f}' for d, _ in pairs))
-    return result
+    return top1, top1_scores, top2, top2_scores
 
 
 # ---------------------------------------------------------------------------
@@ -278,17 +212,19 @@ def neighbor_distances_str(neighbor_indices: np.ndarray, neighbor_dists: np.ndar
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Label cells using KNN majority voting on UCE embeddings"
+        description="Label cells using KNN voting on UCE embeddings"
     )
-    parser.add_argument('--index',      required=True, help='FAISS index file (.faiss)')
-    parser.add_argument('--adata',      required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
-    parser.add_argument('--ref_annot',  required=True, help='Reference metadata TSV (needs cell_label_ontology_term_id+cell_label, or cell_type_ontology_term_id+cell_type)')
-    parser.add_argument('--obo',        required=True, help='Cell Ontology OBO file (cl.obo) for ID -> name translation')
-    parser.add_argument('--method',     default='distance_weighted_knn',
-                        choices=['majority_voting', 'distance_weighted_knn', 'both'],
+    parser.add_argument('--index',     required=True, help='FAISS index file (.faiss)')
+    parser.add_argument('--adata',     required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
+    parser.add_argument('--ref_annot', required=True,
+                        help='Reference metadata TSV — any of these columns found will be predicted: '
+                             'cell_type, cell_label, cell_type_original, mapped_cell_type, '
+                             'mapped_cell_label, harmonized_cell_type, harmonized_cell_label')
+    parser.add_argument('--method',    default='distance_weighted_knn',
+                        choices=['majority_voting', 'distance_weighted_knn'],
                         help='Voting method (default: distance_weighted_knn)')
-    parser.add_argument('--k',          type=int, default=30, help='Number of nearest neighbors (default: 30)')
-    parser.add_argument('--output',     default='labels.tsv', help='Output TSV (default: labels.tsv)')
+    parser.add_argument('--k',         type=int, default=30, help='Number of nearest neighbors (default: 30)')
+    parser.add_argument('--output',    default='labels.tsv', help='Output TSV (default: labels.tsv)')
     return parser
 
 
@@ -298,23 +234,9 @@ def main():
 
     print(f"Loading reference annotations from {args.ref_annot}...")
     ref_df = load_ref_annot(args.ref_annot)
-    term_ids = resolve_labels(ref_df)
+    active_cols = [c for c in LABEL_COLS if c in ref_df.columns]
     print(f"  {len(ref_df)} reference cells")
-
-    print(f"Parsing OBO file {args.obo}...")
-    cl_names = parse_obo_names(args.obo)
-    print(f"  {len(cl_names)} ontology terms")
-
-    cl_replacements = parse_obo_replacements(args.obo)
-    print(f"  {len(cl_replacements)} obsolete terms with replacements")
-    term_col = ('cell_label_ontology_term_id' if 'cell_label_ontology_term_id' in ref_df.columns
-                else 'cell_type_ontology_term_id')
-    ref_terms = ref_df[term_col]
-    n_replaced = int(ref_terms.isin(cl_replacements).sum())
-    if n_replaced > 0:
-        ref_df[term_col] = ref_terms.replace(cl_replacements)
-        term_ids = resolve_labels(ref_df)
-        print(f"  Resolved {n_replaced} obsolete reference terms")
+    print(f"  Label columns found: {active_cols}")
 
     print(f"Loading embeddings from {args.adata}...")
     embeddings, cell_ids = load_adata(args.adata)
@@ -335,44 +257,41 @@ def main():
     print(f"Searching {args.k} nearest neighbors...")
     dists, indices = knn_search(index, embeddings, k=args.k)
 
-    run_mv = args.method in ('majority_voting', 'both')
-    run_wt = args.method in ('distance_weighted_knn', 'both')
-
     valid_dists = np.where(indices >= 0, dists, np.nan)
     mean_distances = np.nanmean(valid_dists, axis=1).tolist()
 
     cols = {'cell_id': cell_ids}
 
-    if run_mv:
-        print("Majority voting (unweighted KNN)...")
-        mv1_ids, mv1_scores, mv2_ids, mv2_scores = majority_voting(indices, dists, term_ids)
-        cols.update({
-            'mv_cell_type_ontology_term_id':   mv1_ids,
-            'mv_cell_type':                    [cl_names.get(p, p) for p in mv1_ids],
-            'mv_score':                        mv1_scores,
-            'mv_cell_type_ontology_term_id_2': mv2_ids,
-            'mv_cell_type_2':                  [cl_names.get(p, p) if p else '' for p in mv2_ids],
-            'mv_score_2':                      mv2_scores,
-        })
+    use_weighted = args.method == 'distance_weighted_knn'
 
-    if run_wt:
-        print("Distance-weighted KNN voting...")
-        neighbor_term_ids = np.vectorize(lambda i: term_ids[i] if i >= 0 else '')(indices)
-        neighbor_term_ids = np.where(np.isfinite(dists) & (indices >= 0), neighbor_term_ids, '')
+    # Precompute weights once if using weighted method
+    if use_weighted:
+        neighbor_labels_cache = {}
         weights = gaussian_kernel_weights(np.where(indices >= 0, dists, 0.0))
-        w1_ids, w1_scores, w2_ids, w2_scores = distance_weighted_knn_vote(weights, neighbor_term_ids)
-        cols.update({
-            'weighted_cell_type_ontology_term_id':   w1_ids,
-            'weighted_cell_type':                    [cl_names.get(p, p) for p in w1_ids],
-            'weighted_score':                        w1_scores,
-            'weighted_cell_type_ontology_term_id_2': w2_ids,
-            'weighted_cell_type_2':                  [cl_names.get(p, p) if p else '' for p in w2_ids],
-            'weighted_score_2':                      w2_scores,
-        })
 
-    cols.update({
-        'mean_euclidean_distance': mean_distances,
-    })
+    last_top1 = None
+    for col in active_cols:
+        print(f"\nVoting on '{col}' ({args.method})...")
+        term_ids = resolve_labels(ref_df, col)
+
+        if use_weighted:
+            neighbor_labels = np.vectorize(lambda i: term_ids[i] if i >= 0 else '')(indices)
+            neighbor_labels = np.where(np.isfinite(dists) & (indices >= 0), neighbor_labels, '')
+            top1, top1_scores, top2, top2_scores = distance_weighted_knn_vote(weights, neighbor_labels)
+            score_col  = f'{col}_weighted_score'
+            score_col2 = f'{col}_weighted_score_2'
+        else:
+            top1, top1_scores, top2, top2_scores = majority_voting(indices, dists, term_ids)
+            score_col  = f'{col}_score'
+            score_col2 = f'{col}_score_2'
+
+        cols[f'{col}_pred']  = top1
+        cols[score_col]      = top1_scores
+        cols[f'{col}_pred_2'] = top2
+        cols[score_col2]     = top2_scores
+        last_top1 = top1
+
+    cols['mean_euclidean_distance'] = mean_distances
 
     output_df = pd.DataFrame(cols)
 
@@ -384,17 +303,17 @@ def main():
         f.write(f"# index:      {args.index} ({index.ntotal} vectors, {index.d}d)\n")
         f.write(f"# adata:      {args.adata} ({n_cells} cells, {emb_dim}d, obsm['X_uce'])\n")
         f.write(f"# ref_annot:  {args.ref_annot} ({len(ref_df)} cells)\n")
-        f.write(f"# obo:        {args.obo} ({len(cl_names)} terms)\n")
+        f.write(f"# label_cols: {active_cols}\n")
         f.write(f"# k:          {args.k}\n")
         f.write(f"# method:     {args.method}\n")
         output_df.to_csv(f, sep='\t', index=False)
 
     print(f"\nSaved {n_cells} cell labels to {args.output}")
-    top_preds = mv1_ids if run_mv else w1_ids
-    n_empty = sum(1 for p in top_preds if p == '')
-    if n_empty:
-        print(f"  Warning: {n_empty} cells had no valid neighbors for voting")
-    print(f"  Unique predicted types: {len(set(p for p in top_preds if p))}")
+    if last_top1 is not None:
+        n_empty = sum(1 for p in last_top1 if p == '')
+        if n_empty:
+            print(f"  Warning: {n_empty} cells had no valid neighbors for voting")
+        print(f"  Unique predicted labels ({active_cols[-1]}): {len(set(p for p in last_top1 if p))}")
 
 
 if __name__ == '__main__':
