@@ -16,9 +16,9 @@ import pandas as pd
 
 def build_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--labels', required=True, help='predicted_labels.tsv from predict.py')
-    parser.add_argument('--adata',  required=True, help='Query h5ad file')
-    parser.add_argument('--output', default='predictions_with_obs.tsv', help='Output TSV (default: predictions_with_obs.tsv)')
+    parser.add_argument('--labels', required=True, metavar='FILE', help='predicted_labels.tsv from predict.py')
+    parser.add_argument('--adata',  required=True, metavar='FILE', help='Query h5ad file')
+    parser.add_argument('--output', default='predictions_with_obs.tsv', metavar='FILE', help='Output TSV (default: predictions_with_obs.tsv)')
     return parser
 
 

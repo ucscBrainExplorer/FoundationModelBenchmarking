@@ -200,16 +200,16 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Label cells using KNN voting on UCE embeddings"
     )
-    parser.add_argument('--index',     required=True, help='FAISS index file (.faiss)')
-    parser.add_argument('--adata',     required=True, help='h5ad file with adata.obsm["X_uce"] embeddings')
-    parser.add_argument('--ref_annot', required=True,
+    parser.add_argument('--index',     required=True, metavar='FILE', help='FAISS index file (.faiss)')
+    parser.add_argument('--adata',     required=True, metavar='FILE', help='h5ad file with adata.obsm["X_uce"] embeddings')
+    parser.add_argument('--ref_annot', required=True, metavar='FILE',
                         help='Reference metadata TSV — all columns except those ending '
                              'with _term_id are predicted, in ref TSV column order')
     parser.add_argument('--method',    default='distance_weighted_knn',
                         choices=['majority_voting', 'distance_weighted_knn'],
                         help='Voting method (default: distance_weighted_knn)')
     parser.add_argument('--k',         type=int, default=30, help='Number of nearest neighbors (default: 30)')
-    parser.add_argument('--output',    default='labels.tsv', help='Output TSV (default: labels.tsv)')
+    parser.add_argument('--output',    default='labels.tsv', metavar='FILE', help='Output TSV (default: labels.tsv)')
     return parser
 
 
