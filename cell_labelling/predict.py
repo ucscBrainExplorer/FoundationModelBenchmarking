@@ -58,6 +58,17 @@ def load_adata(path: str):
     return embeddings, cell_ids
 
 
+def load_npy(npy_path: str, obs_path: str):
+    if not os.path.exists(npy_path):
+        raise FileNotFoundError(f"npy file not found: {npy_path}")
+    if not os.path.exists(obs_path):
+        raise FileNotFoundError(f"obs TSV not found: {obs_path}")
+    embeddings = np.load(npy_path).astype(np.float32)
+    obs = pd.read_csv(obs_path, sep='\t', index_col=0)
+    cell_ids = list(obs.index)
+    return embeddings, cell_ids
+
+
 def load_ref_annot(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Reference annotations not found: {path}")
@@ -145,6 +156,66 @@ def knn_search(index: faiss.Index, embeddings: np.ndarray, k: int):
     return dists, indices
 
 
+def enrichment_weighted_knn_vote(neighbor_labels: np.ndarray, ref_label_frac: dict):
+    """
+    Vote weighted by log2(observed / expected) enrichment over reference abundance.
+
+    For each query cell:
+      - Count observed label frequency among k neighbors
+      - Divide by expected frequency in reference (ref_label_frac)
+      - Score per label = count * log2(enrichment), floored at 0
+      - Winner = label with highest total score
+
+    Parameters:
+        neighbor_labels — (N, k) string array of neighbor labels
+        ref_label_frac  — dict mapping label -> fraction in reference
+
+    Returns:
+        top1, top1_scores, top2, top2_scores — each length-N list
+        Scores are winner's share of total score (0-1).
+    """
+    top1, top1_scores = [], []
+    top2, top2_scores = [], []
+
+    for row_labels in neighbor_labels:
+        valid = [t for t in row_labels if t != '']
+        if not valid:
+            top1.append('');   top1_scores.append(float('nan'))
+            top2.append('');   top2_scores.append(float('nan'))
+            continue
+
+        k = len(valid)
+        counts = Counter(valid)
+        scores = {}
+        for label, cnt in counts.items():
+            exp_frac = ref_label_frac.get(label, 0)
+            if exp_frac <= 0:
+                continue
+            obs_frac = cnt / k
+            enrichment = obs_frac / exp_frac
+            log2_enr = max(0.0, np.log2(enrichment))  # floor at 0 (no penalty for depleted)
+            scores[label] = cnt * log2_enr
+
+        if not scores:
+            top1.append('');   top1_scores.append(float('nan'))
+            top2.append('');   top2_scores.append(float('nan'))
+            continue
+
+        total = sum(scores.values())
+        ranked = sorted(scores.items(), key=lambda x: -x[1])
+
+        top1.append(ranked[0][0])
+        top1_scores.append(min(ranked[0][1] / total, 1.0) if total > 0 else float('nan'))
+        if len(ranked) > 1:
+            top2.append(ranked[1][0])
+            top2_scores.append(min(ranked[1][1] / total, 1.0) if total > 0 else float('nan'))
+        else:
+            top2.append('')
+            top2_scores.append(float('nan'))
+
+    return top1, top1_scores, top2, top2_scores
+
+
 def majority_voting(neighbor_indices: np.ndarray, neighbor_dists: np.ndarray, term_ids: np.ndarray):
     """
     Majority vote among k neighbors, return top-2 per cell.
@@ -202,12 +273,15 @@ def build_parser():
         description="Label cells using KNN voting on UCE embeddings"
     )
     parser.add_argument('--index',     required=True, metavar='FILE', help='FAISS index file (.faiss)')
-    parser.add_argument('--adata',     required=True, metavar='FILE', help='h5ad file with adata.obsm["X_uce"] embeddings')
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--adata', metavar='FILE', help='h5ad file with adata.obsm["X_uce"] embeddings')
+    input_group.add_argument('--npy',   metavar='FILE', help='UCE embeddings .npy file (requires --obs)')
+    parser.add_argument('--obs',        metavar='FILE', help='obs TSV (required with --npy)')
     parser.add_argument('--ref_annot', required=True, metavar='FILE',
                         help='Reference metadata TSV — all columns except those ending '
                              'with _term_id are predicted, in ref TSV column order')
     parser.add_argument('--method',    default='distance_weighted_knn',
-                        choices=['majority_voting', 'distance_weighted_knn'],
+                        choices=['majority_voting', 'distance_weighted_knn', 'enrichment_weighted_knn'],
                         help='Voting method (default: distance_weighted_knn)')
     parser.add_argument('--k',         type=int, default=30, help='Number of nearest neighbors (default: 30)')
     parser.add_argument('--output',    default='labels.tsv', metavar='FILE', help='Output TSV (default: labels.tsv)')
@@ -224,8 +298,15 @@ def main():
     print(f"  {len(ref_df)} reference cells")
     print(f"  Columns to predict: {active_cols}")
 
-    print(f"Loading embeddings from {args.adata}...")
-    embeddings, cell_ids = load_adata(args.adata)
+    if args.npy and not args.obs:
+        parser.error("--obs is required when using --npy")
+
+    if args.npy:
+        print(f"Loading embeddings from {args.npy}...")
+        embeddings, cell_ids = load_npy(args.npy, args.obs)
+    else:
+        print(f"Loading embeddings from {args.adata}...")
+        embeddings, cell_ids = load_adata(args.adata)
     n_cells, emb_dim = embeddings.shape
     print(f"  {n_cells} cells, {emb_dim}d")
 
@@ -246,8 +327,10 @@ def main():
     valid_dists = np.where(indices >= 0, dists, np.nan)
     mean_distances = np.nanmean(valid_dists, axis=1).tolist()
 
-    use_weighted = args.method == 'distance_weighted_knn'
-    if use_weighted:
+    use_distance_weighted = args.method == 'distance_weighted_knn'
+    use_enrichment = args.method == 'enrichment_weighted_knn'
+
+    if use_distance_weighted:
         weights = gaussian_kernel_weights(np.where(indices >= 0, dists, 0.0))
 
     cols = {'cell_id': cell_ids}
@@ -256,11 +339,16 @@ def main():
     for col in active_cols:
         print(f"\nVoting on '{col}' ({args.method})...")
         term_ids = resolve_labels(ref_df, col)
+        neighbor_labels = np.vectorize(lambda i: term_ids[i] if i >= 0 else '')(indices)
+        neighbor_labels = np.where(np.isfinite(dists) & (indices >= 0), neighbor_labels, '')
 
-        if use_weighted:
-            neighbor_labels = np.vectorize(lambda i: term_ids[i] if i >= 0 else '')(indices)
-            neighbor_labels = np.where(np.isfinite(dists) & (indices >= 0), neighbor_labels, '')
+        if use_distance_weighted:
             top1, top1_scores, top2, top2_scores = distance_weighted_knn_vote(weights, neighbor_labels)
+        elif use_enrichment:
+            total_ref = len(ref_df)
+            label_counts = pd.Series(term_ids).value_counts()
+            ref_label_frac = (label_counts / total_ref).to_dict()
+            top1, top1_scores, top2, top2_scores = enrichment_weighted_knn_vote(neighbor_labels, ref_label_frac)
         else:
             top1, top1_scores, top2, top2_scores = majority_voting(indices, dists, term_ids)
 
@@ -270,7 +358,7 @@ def main():
         cols[f'prediction_by_{col}_top2_score'] = top2_scores
         all_top1[col]                           = top1
 
-    cols['mean_euclidean_distance'] = mean_distances
+    cols['prediction_mean_euclidean_distance'] = mean_distances
 
     output_df = pd.DataFrame(cols)
 
