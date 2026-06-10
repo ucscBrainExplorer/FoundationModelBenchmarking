@@ -313,8 +313,20 @@ pytest unit-tests/ -v     # legacy test suite
 
 ## References
 
-- Lin, D. (1998). An Information-Theoretic Definition of Similarity. *ICML 1998*, pp. 296–304.
-- Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content for Semantic Similarity in WordNet. *FGCNS 2008*, pp. 85–89. doi:10.1109/FGCNS.2008.16.
+**Ontology similarity — foundational methods**
+
+- Resnik, P. (1995). Using Information Content to Evaluate Semantic Similarity in a Taxonomy. *IJCAI 1995*, pp. 448–453. — Introduced Information Content as a measure of term specificity in ontologies; the root of the IC-based similarity family.
+- Lin, D. (1998). An Information-Theoretic Definition of Similarity. *ICML 1998*, pp. 296–304. — Defined the Lin similarity formula `2·IC(MICA) / (IC(A) + IC(B))` used here to score predictions against ground truth.
+- Zhou, Z., Wang, Y., & Gu, J. (2008). A New Model of Information Content for Semantic Similarity in WordNet. *FGCNS 2008*, pp. 85–89. doi:10.1109/FGCNS.2008.16. — Source of the blended IC formula (descendant count + depth) used to precompute IC values on the Cell Ontology.
+
+**IC similarity applied to biological ontologies**
+
+- Lord, P.W., Stevens, R.D., Brass, A., & Goble, C.A. (2003). Investigating semantic similarity measures across the Gene Ontology: the relationship between sequence and annotation. *Bioinformatics*, 19(10), 1275–1283. — First demonstration that IC-based semantic similarity of ontology annotations correlates with biological similarity (sequence identity), establishing that this approach is meaningful for evaluating cell type predictions.
+- Pesquita, C., Faria, D., Falcão, A.O., Lord, P., & Couto, F.M. (2009). Semantic Similarity in Biomedical Ontologies. *PLOS Computational Biology*, 5(7), e1000443. — Comprehensive review of IC and graph-based semantic similarity across biomedical ontologies including GO; the primary reference for using these metrics to evaluate biological annotations.
+- Schlicker, A., Domingues, F.S., Rahnenführer, J., & Lengauer, T. (2006). A new measure for functional similarity of gene products based on Gene Ontology. *BMC Bioinformatics*, 7, 302. — Applied Lin similarity to GO to compare gene function; the direct precedent for using the same metric to compare cell type annotations.
+
+**Data and tools**
+
 - [Cell Ontology (OBO Foundry)](http://obofoundry.org/ontology/cl.html)
 - [FAISS](https://github.com/facebookresearch/faiss)
 - [Universal Cell Embeddings (UCE)](https://www.biorxiv.org/content/10.1101/2023.11.28.568918v1)

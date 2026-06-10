@@ -1,0 +1,49 @@
+# Batch predict + evaluate config
+# Run with: python3 batch_run.py batch_config_example.yaml
+
+defaults:
+  method: enrichment_weighted_knn
+  k: 30
+  obo: /path/to/cl.obo
+  ontology_method: ic
+  output_dir: /path/to/results/        # top-level base; each run outputs to output_dir/<name>/
+  # pred_id_col and truth_id_col are per-run (column names differ per dataset)
+
+runs:
+
+  # predict only (no ground_truth → evaluation is skipped)
+  # output: /path/to/results/human_bg_to_zhuang/
+  - name: human_bg_to_zhuang
+    index:     /path/to/zhuang_abca1.faiss
+    adata:     /path/to/human_bg_uce.h5ad
+    ref_annot: /path/to/zhuang_abca1_ref_annot.tsv
+
+  # predict + evaluate
+  # output: /path/to/results/human_ctx_to_allen/
+  - name: human_ctx_to_allen
+    index:        /path/to/allen_ctx.faiss
+    adata:        /path/to/human_ctx_uce.h5ad
+    ref_annot:    /path/to/allen_ctx_ref_annot.tsv
+    ground_truth: /path/to/human_ctx_ground_truth.tsv
+    pred_id_col:  weighted_cell_type_ontology_term_id
+    truth_id_col: mapped_cell_label_ontology_term_id
+
+  # npy input, per-run method override, different column names
+  # output: /path/to/results/mouse_str_to_allen/
+  - name: mouse_str_to_allen
+    index:        /path/to/allen_str.faiss
+    npy:          /path/to/mouse_str_uce.npy
+    obs:          /path/to/mouse_str_obs.tsv
+    ref_annot:    /path/to/allen_str_ref_annot.tsv
+    ground_truth: /path/to/mouse_str_ground_truth.tsv
+    pred_id_col:  predicted_cell_type_ontology_term_id
+    truth_id_col: cell_type_ontology_term_id
+    method: distance_weighted_knn
+
+  # optional: override the subdir name (default is the run name)
+  # output: /path/to/results/my_custom_subdir/
+  - name: human_bg_to_allen
+    index:     /path/to/allen.faiss
+    adata:     /path/to/human_bg_uce.h5ad
+    ref_annot: /path/to/allen_ref_annot.tsv
+    subdir:    my_custom_subdir
